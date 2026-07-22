@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# PRIVATE MEETING CONTENT — never commit.
+# The archive holds transcripts and summaries of real meetings and may contain
+# sensitive personal information. It must never reach a remote, public or private.
+# ---------------------------------------------------------------------------
+archive/
+*.archive/
+/notes/
+/export/
+/exports/
+
+# ---------------------------------------------------------------------------
+# Secrets — never commit.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.enc
+credentials.json
+secrets.json
+*token*.json
+*.granola-key
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+
+# Note: uv.lock IS committed on purpose — it pins the dependency graph.
+
+# ---------------------------------------------------------------------------
+# Editors and tooling
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------------
+# macOS
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*

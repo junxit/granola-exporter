@@ -1,0 +1,27 @@
+Changelog
+=========
+
+Unreleased
+----------
+- Initial implementation: incremental Granola meeting archive.
+- Public API client (public-api.granola.ai/v1) with cursor pagination,
+  token-bucket rate limiting and Retry-After-aware 429 backoff.
+- Markdown + raw JSON archive layout with content-hash change detection;
+  raw.json is written before rendering so template changes never refetch.
+- Incremental sync via an updated_at watermark; a no-op re-sync issues zero
+  per-note detail requests.
+- Retention guarantee: notes removed upstream are flagged upstream_missing in
+  the index and never deleted from disk.
+- Internal UUID recovered from web_url, enabling a join to the internal API
+  and the Granola MCP (verified on 89/89 notes).
+
+Verified against a live account
+-------------------------------
+- Backfill: 89 notes in 33s; 89/89 with transcripts; 32,195 utterances.
+- Re-sync: 0 detail fetches, 0.57s.
+- Fidelity: an 18-month-old transcript matched the MCP reference exactly.
+- Reconciliation: 89 upstream, 89 archived, zero gap.
+- The public API exposes no audio, recording, attachment or panel field on any
+  note, so those cannot be archived through the supported path.
+- One folder reference points at a note that no API path returns; see README
+  "Known limitations".
