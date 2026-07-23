@@ -3,6 +3,9 @@ Changelog
 
 Unreleased
 ----------
+- License: switched from proprietary/all-rights-reserved to the PolyForm
+  Noncommercial License 1.0.0 (source-available). Noncommercial use is free;
+  commercial use requires a separate license. Copyright remains Jade Naaman.
 - Initial implementation: incremental Granola meeting archive.
 - Public API client (public-api.granola.ai/v1) with cursor pagination,
   token-bucket rate limiting and Retry-After-aware 429 backoff.

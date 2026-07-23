@@ -53,7 +53,7 @@ cp .env.example .env
 # then edit .env and paste your key
 ```
 
-Create the key in Granola: **Settings → API → Create new key**. It starts with
+Create the key in Granola: **Settings → Connectors → Personal API Keys → Create new key**. It starts with
 `grn_`.
 
 ```bash
@@ -185,5 +185,13 @@ no API key and no network required.
 
 ## License
 
-Proprietary — copyright © 2026 Jade Naaman, all rights reserved. See
-[LICENSE](LICENSE).
+Source-available under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/).
+
+You may use, modify and share `granola-exporter` for any **noncommercial**
+purpose — personal use, research, education, and nonprofit, public and
+government use are all covered. **Any commercial use requires a separate
+license** from the copyright holder.
+
+This is *source-available*, not open source: it restricts commercial use.
+Copyright © 2026 Jade Naaman. For a commercial license, contact the copyright
+holder. See [LICENSE](LICENSE) for full terms.
