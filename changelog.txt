@@ -3,6 +3,7 @@ Changelog
 
 Unreleased
 ----------
+- Renamed LICENSE to LICENSE.md so it renders as Markdown on GitHub.
 - License: switched from proprietary/all-rights-reserved to the PolyForm
   Noncommercial License 1.0.0 (source-available). Noncommercial use is free;
   commercial use requires a separate license. Copyright remains Jade Naaman.

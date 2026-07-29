@@ -194,4 +194,4 @@ license** from the copyright holder.
 
 This is *source-available*, not open source: it restricts commercial use.
 Copyright © 2026 Jade Naaman. For a commercial license, contact the copyright
-holder. See [LICENSE](LICENSE) for full terms.
+holder. See [LICENSE](LICENSE.md) for full terms.
