@@ -267,6 +267,14 @@ API key, use it — this backend exists for accounts that cannot get one.
   see [SECURITY.md](SECURITY.md).
 - **Free plans are further limited.** Basic caps history at 30 days and does not
   serve raw transcripts at all.
+- **Transcripts are aggressively rate limited.** Measured live: `get_meeting_transcript`
+  was still rejected at 20-second spacing, far below the ~100 req/min the docs
+  quote for the tools overall. The client backs off (5s → 15s → 30s → 60s) and
+  retries, but a large backfill will not fetch every transcript in one pass.
+  Notes are archived **without** a transcript rather than being skipped, the
+  count is reported as a warning, and **re-running `sync` retries exactly those
+  notes** — an archived transcript is never refetched, so re-runs are cheap and
+  converge. Budget several passes for a first MCP backfill.
 
 ### How the two backends join up
 
@@ -276,7 +284,12 @@ UUID embedded in the public API's `web_url`
 against real meetings — and `index.json` has always recorded it. That is what
 makes never-downgrade and promotion possible:
 
-- A meeting already archived from the public API is skipped by MCP syncs.
+- A meeting already archived from the public API is skipped by MCP syncs —
+  verified against a real 92-note archive: an MCP sync over a window containing
+  six already-archived meetings reported `0 new, 0 updated, 6 unchanged` and
+  issued **zero** detail fetches, leaving all 276 files byte-identical.
+  Entries written before provenance tracking existed carry no `source` field
+  and are correctly treated as public-API notes.
 - When a key arrives, `sync` **adopts** the MCP entry: the directory is moved,
   the `not_*` key replaces the `mcp_*` one, and no duplicate is left behind.
 - `verify` reports any UUID appearing under two keys, which should always be

@@ -89,6 +89,7 @@ class SyncCounts:
     transcript_fetches: int = 0
     list_calls: int = 0
     undated: int = 0
+    transcripts_failed: int = 0
     truncated_windows: int = 0
 
     def record(self, status: str) -> None:
@@ -110,6 +111,30 @@ class SyncCounts:
             f"{self.unchanged} unchanged, {self.skipped} skipped, "
             f"{self.failed} failed ({self.detail_fetches} detail fetches)"
         )
+
+    def warnings(self) -> list[str]:
+        """Conditions worth surfacing even on an otherwise successful run.
+
+        Returns:
+            Human-readable warnings; empty when the run was clean.
+        """
+        notes = []
+        if self.transcripts_failed:
+            notes.append(
+                f"{self.transcripts_failed} note(s) archived WITHOUT a transcript "
+                "— re-run sync to retry them"
+            )
+        if self.undated:
+            notes.append(
+                f"{self.undated} note(s) had an unresolvable date and were filed "
+                "under undated/"
+            )
+        if self.truncated_windows:
+            notes.append(
+                f"{self.truncated_windows} window(s) may be incomplete — "
+                "re-run with --full"
+            )
+        return notes
 
 
 def _stub_updated_at(stub: dict[str, Any]) -> str | None:
@@ -678,8 +703,15 @@ def _write_mcp_meetings(
                 except MCPResponseFormatError:
                     raise
                 except Exception as exc:  # noqa: BLE001
-                    if opts.verbose:
-                        print(f"  skip  transcript for {key} — {exc}")
+                    # Never silent. A transcript is the most valuable thing in
+                    # the archive; losing one quietly is the worst outcome
+                    # here, and swallowing this is how a live backfill once
+                    # produced 66 notes with zero transcripts.
+                    counts.transcripts_failed += 1
+                    print(
+                        f"  WARN  no transcript for {key} — {exc}",
+                        file=sys.stderr,
+                    )
 
             names = folders.get(detail.meeting_id) or set(previous.get("folders") or [])
             raw = build_raw(

@@ -3,6 +3,19 @@ Changelog
 
 Unreleased
 ----------
+- Fix: MCP rate limiting arrives as a tool error (HTTP 200 with isError set),
+  not a 429, so nothing retried and a live backfill archived 66 notes with zero
+  transcripts. The client now recognises it and backs off 5/15/30/60s. Measured
+  live: get_meeting_transcript is still rejected at 20s spacing, far below the
+  ~100 req/min the docs quote, so a first backfill needs several passes.
+- Fix: get_meeting_transcript prefixes its JSON with the prompt-injection
+  preamble, so parsing from byte zero failed every time. `get_account_info` and
+  `list_meeting_folders` do not, so the payload is now located rather than
+  assumed to start at the first byte.
+- Fix: a failed transcript fetch was swallowed under a verbose-only branch,
+  which is how the above went unnoticed. Failures are now counted, warned on
+  stderr, and reported in the run summary; re-running sync retries exactly
+  those notes, since an archived transcript is never refetched.
 - Fix: `granola-export login` refused to run whenever stdin was not a TTY. The
   flow never reads stdin -- it opens a browser and waits on a loopback socket --
   so the check was simply the wrong signal, and it broke login under any wrapper
