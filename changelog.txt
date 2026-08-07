@@ -3,6 +3,12 @@ Changelog
 
 Unreleased
 ----------
+- Fix: `granola-export login` refused to run whenever stdin was not a TTY. The
+  flow never reads stdin -- it opens a browser and waits on a loopback socket --
+  so the check was simply the wrong signal, and it broke login under any wrapper
+  that runs commands non-interactively. It now always attempts the browser and
+  falls back to printing the URL, with output flushed so the URL appears
+  immediately even when stdout is a pipe.
 - Added a second backend: the Granola MCP (https://mcp.granola.ai/mcp), which
   works on every plan including free Basic, where public API keys require a
   Business or Enterprise plan. Browser OAuth via `granola-export login`; token

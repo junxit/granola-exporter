@@ -144,6 +144,27 @@ def test_doctor_reports_unauthorised_mcp_without_network(capsys):
     assert "sync source : mcp" in out
 
 
+def test_login_does_not_gate_on_a_tty(monkeypatch):
+    """Regression: login must not refuse just because stdin is not a terminal.
+
+    The flow never reads stdin -- it opens a browser and waits on a loopback
+    socket -- so a piped or captured stdin says nothing about whether
+    authorisation can succeed. Gating on it broke login under any wrapper that
+    runs commands non-interactively.
+    """
+    called: list[bool] = []
+
+    def fake_login(url, *, open_browser=True):
+        called.append(open_browser)
+        return {"email": "oat@granola.ai"}
+
+    monkeypatch.setattr("granola_exporter.mcp_api.login", fake_login)
+    monkeypatch.setattr("sys.stdin", type("NoTTY", (), {"isatty": lambda self: False})())
+
+    assert main(["login"]) == 0
+    assert called == [True], "login must still attempt the browser"
+
+
 def test_logout_is_idempotent(capsys):
     """Clearing credentials that are already absent is not an error."""
     assert main(["logout"]) == 0
