@@ -1,6 +1,6 @@
 [project]
 name = "granola-exporter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local, incremental archive of Granola meetings, transcripts and summaries."
 license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE.md"]
@@ -8,6 +8,11 @@ requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.27",
     "python-dotenv>=1.0",
+    # The MCP backend. Note this brings its own HTTP stack (httpx2) alongside
+    # httpx, plus an ASGI server stack this tool never runs. It is isolated
+    # behind mcp_api.MCPClient and imported lazily, so the public API path pays
+    # none of it and the SDK can be swapped out in one file.
+    "mcp>=2.0",
 ]
 
 [project.scripts]

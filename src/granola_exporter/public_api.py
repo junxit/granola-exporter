@@ -18,7 +18,18 @@ from typing import Any
 
 import httpx
 
+from . import USER_AGENT
 from .models import is_valid_note_id
+from .ratelimit import RateLimiter
+
+# Re-exported so ``from .public_api import RateLimiter`` keeps working.
+__all__ = [
+    "BASE_URL",
+    "GranolaAPIError",
+    "NoteNotFoundError",
+    "PublicAPIClient",
+    "RateLimiter",
+]
 
 BASE_URL = "https://public-api.granola.ai/v1"
 
@@ -50,37 +61,6 @@ class NoteNotFoundError(GranolaAPIError):
     """
 
 
-class RateLimiter:
-    """Token bucket matching Granola's documented burst and sustained limits."""
-
-    def __init__(
-        self, capacity: int = BURST_CAPACITY, rate: float = SUSTAINED_RATE
-    ) -> None:
-        """Initialise a full bucket.
-
-        Args:
-            capacity: Maximum burst size, in requests.
-            rate: Sustained refill rate, in tokens per second.
-        """
-        self.capacity = capacity
-        self.rate = rate
-        self._tokens = float(capacity)
-        self._updated = time.monotonic()
-
-    def acquire(self) -> None:
-        """Block until a request token is available, then consume it."""
-        while True:
-            now = time.monotonic()
-            self._tokens = min(
-                self.capacity, self._tokens + (now - self._updated) * self.rate
-            )
-            self._updated = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return
-            time.sleep((1.0 - self._tokens) / self.rate)
-
-
 class PublicAPIClient:
     """Read-only client for the Granola public API."""
 
@@ -103,13 +83,13 @@ class PublicAPIClient:
                 "(Granola -> Settings -> Connectors -> Personal API Keys -> Create new key)."
             )
         self.base_url = base_url.rstrip("/")
-        self._limiter = RateLimiter()
+        self._limiter = RateLimiter(BURST_CAPACITY, SUSTAINED_RATE)
         self._client = httpx.Client(
             timeout=timeout,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
-                "User-Agent": "granola-exporter/0.1.0",
+                "User-Agent": USER_AGENT,
             },
         )
 

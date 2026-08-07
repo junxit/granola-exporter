@@ -17,7 +17,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from granola_exporter.models import Note, is_valid_folder_id, is_valid_note_id
+from granola_exporter.models import (
+    Note,
+    is_valid_archive_key,
+    is_valid_folder_id,
+    is_valid_mcp_note_id,
+    is_valid_note_id,
+    mcp_archive_key,
+)
 from granola_exporter.public_api import GranolaAPIError, PublicAPIClient, RateLimiter
 from granola_exporter.render import render_note, render_transcript
 from granola_exporter.store import (
@@ -231,5 +238,102 @@ def test_live_archive_ids_all_conform():
     if not index_path.is_file():
         pytest.skip("no local archive to check")
     ids = list(json.loads(index_path.read_text(encoding="utf-8")))
-    bad = [i for i in ids if not is_valid_note_id(i)]
+    bad = [i for i in ids if not is_valid_archive_key(i)]
     assert not bad, f"validation would reject real archived ids: {bad[:5]}"
+
+    # An `mcp_` key must satisfy the stricter MCP shape, not merely the union.
+    mcp_bad = [
+        i for i in ids if i.startswith("mcp_") and not is_valid_mcp_note_id(i)
+    ]
+    assert not mcp_bad, f"malformed MCP keys in the archive: {mcp_bad[:5]}"
+
+
+# -- MCP id namespace ------------------------------------------------------
+
+
+def test_valid_mcp_key_accepted():
+    """A canonical MCP key round-trips through the validators."""
+    key = "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1"
+    assert is_valid_mcp_note_id(key)
+    assert is_valid_archive_key(key)
+    assert not is_valid_note_id(key), "MCP keys must not pass the public API check"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "mcp_../../../../etc/passwd",
+        "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1/../..",
+        "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1/x",
+        "mcp_E96C1C66-ED02-4A32-9ACD-54720F8761B1",  # uppercase
+        "mcp_e96c1c66ed024a329acd54720f8761b1",  # no hyphens
+        "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b",  # short group
+        "/tmp/mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1",
+        "mcp_",
+        "e96c1c66-ed02-4a32-9acd-54720f8761b1",  # bare uuid, unprefixed
+        "",
+        None,
+        123,
+    ],
+)
+def test_malformed_mcp_keys_rejected(value):
+    """Anything not exactly ``mcp_`` + canonical UUID is refused."""
+    assert not is_valid_mcp_note_id(value)
+    assert not is_valid_archive_key(value)
+
+
+@pytest.mark.parametrize("depth", range(1, 8))
+def test_mcp_traversal_keys_never_escape(tmp_path, note_payload, depth):
+    """A traversal payload wearing an ``mcp_`` prefix cannot escape the root."""
+    archive = Archive(tmp_path / "archive")
+    note = Note.from_api(note_payload)
+    note.id = "mcp_" + "../" * depth + "escaped"
+    with pytest.raises(UnsafeArchivePathError):
+        archive.note_dir(note)
+
+
+def test_mcp_archive_key_builds_only_from_valid_uuids():
+    """The key builder refuses anything that is not a UUID."""
+    assert (
+        mcp_archive_key("E96C1C66-ED02-4A32-9ACD-54720F8761B1")
+        == "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1"
+    ), "ids are normalised to lowercase so one meeting yields one key"
+    for bad in ["../../etc", "", None, "not_1d3tmYTlCICgjy", "abc", 42]:
+        assert mcp_archive_key(bad) is None
+
+
+def test_get_note_refuses_an_mcp_key_before_request():
+    """The security invariant: widening the path check must not widen the URL check.
+
+    ``store.note_dir`` now accepts ``mcp_*`` keys, but the public API client
+    must still reject them without issuing a request.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"id": "x"})
+
+    client = PublicAPIClient("grn_test", base_url="https://api.test/v1")
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    client._limiter = RateLimiter(capacity=1000, rate=1e6)
+
+    with client:
+        with pytest.raises(GranolaAPIError, match="malformed note id"):
+            client.get_note("mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1")
+    assert not called, "an MCP key reached the public API URL builder"
+
+
+def test_note_dir_accepts_both_namespaces_inside_root(tmp_path, note_payload):
+    """Both id shapes build paths, and both stay under the archive root."""
+    archive = Archive(tmp_path / "archive")
+    for note_id in (
+        "not_1d3tmYTlCICgjy",
+        "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1",
+    ):
+        note = Note.from_api(note_payload)
+        note.id = note_id
+        target = archive.note_dir(note)
+        assert archive.root in target.parents
+        assert note_id in target.name
