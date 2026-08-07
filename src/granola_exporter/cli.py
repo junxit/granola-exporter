@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from .models import SOURCE_MCP, SOURCE_PUBLIC_API
 from .public_api import GranolaAPIError, PublicAPIClient
 from .store import Archive
-from .sync import SyncOptions, sync_mcp, sync_public_api
+from .sync import SyncOptions, scan_mcp_meeting_ids, sync_mcp, sync_public_api
 
 DEFAULT_ARCHIVE = "./archive"
 DEFAULT_MCP_URL = "https://mcp.granola.ai/mcp"
@@ -502,8 +502,82 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 print("  gap                : none — archive covers all upstream notes")
         except GranolaAPIError as exc:
             print(f"  upstream check     : skipped ({exc})")
+    elif _effective_source(config) == "mcp":
+        _verify_against_mcp(archive, config, index, folders, deep=bool(args.deep))
 
     return 1 if (missing_dirs or missing_raw or duplicates) else 0
+
+
+def _verify_against_mcp(
+    archive: Archive,
+    config: Config,
+    index: dict,
+    archived_folders: dict[str, int],
+    *,
+    deep: bool,
+) -> None:
+    """Reconcile the archive against the MCP.
+
+    The cheap check costs one request: folder note counts, compared by folder
+    *name*, which is the only key the two backends share. ``--deep`` pays for a
+    full windowed listing scan and reports a real per-meeting gap.
+
+    Args:
+        archive: The archive being verified.
+        config: The loaded configuration.
+        index: The loaded index.
+        archived_folders: Archived note counts per folder name.
+        deep: Whether to run the full scan.
+    """
+    from .mcp_api import MCPClient, MCPError
+    from .mcp_auth import MCPAuthError
+
+    storage = _mcp_storage(config)
+    if not storage.status().present:
+        print("  upstream check     : skipped (not authorised — run 'login')")
+        return
+
+    try:
+        with MCPClient(config.mcp_url, allow_login=False) as client:
+            print("  folder counts (MCP vs archived, joined by name):")
+            for folder in client.list_folders():
+                name = str(folder.get("title") or folder.get("name") or "")
+                upstream = folder.get("note_count")
+                mine = archived_folders.get(name, 0)
+                if not name or not isinstance(upstream, int):
+                    continue
+                flag = "" if upstream == mine else "   <-- differs"
+                print(f"    {name:<20} MCP {upstream:>4}   archived {mine:>4}{flag}")
+
+            if not deep:
+                print("  (pass --deep for a full per-meeting gap check)")
+                return
+
+            state = archive.source_state(SOURCE_MCP)
+            # Without a prior MCP sync there is no recorded floor, so fall back
+            # to the oldest note already archived rather than guessing a date.
+            floor = state.get("earliest_scanned") or min(
+                (
+                    str(entry.get("created_at") or "")[:10]
+                    for entry in index.values()
+                    if entry.get("created_at")
+                ),
+                default=date.today().isoformat(),
+            )
+            seen, list_calls = scan_mcp_meeting_ids(
+                client, date.fromisoformat(floor), date.today()
+            )
+
+            gap = seen - set(archive.uuid_index())
+            print(f"  upstream meetings  : {len(seen)} ({list_calls} listings)")
+            if gap:
+                print(f"  NOT ARCHIVED       : {len(gap)} — run 'sync --source mcp'")
+                for uuid in sorted(gap)[:10]:
+                    print(f"    {uuid}")
+            else:
+                print("  gap                : none — archive covers every MCP meeting")
+    except (MCPAuthError, MCPError) as exc:
+        print(f"  upstream check     : skipped ({exc})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -575,6 +649,12 @@ def main(argv: list[str] | None = None) -> int:
 
     verify = sub.add_parser("verify", help="check integrity and reconcile with a backend")
     add_source(verify)
+    verify.add_argument(
+        "--deep",
+        action="store_true",
+        help="scan every MCP listing window for a true per-meeting gap "
+        "(costs one request per 31 days; the default check costs one)",
+    )
     verify.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)

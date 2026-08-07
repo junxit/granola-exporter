@@ -175,3 +175,100 @@ def test_verify_runs_on_an_empty_archive(capsys):
     """Verify must work before anything has been synced."""
     assert main(["verify"]) == 0
     assert "indexed notes      : 0" in capsys.readouterr().out
+
+
+# -- verify: MCP reconcile -------------------------------------------------
+
+
+class _FakeMCPClient:
+    """Stands in for MCPClient inside cmd_verify."""
+
+    folders: list = []
+    listing: str = ""
+
+    def __init__(self, *a, **k) -> None:
+        """Accept whatever the CLI passes."""
+
+    def __enter__(self):
+        """Enter the context manager."""
+        return self
+
+    def __exit__(self, *exc):
+        """Exit the context manager."""
+
+    def list_folders(self):
+        """Return the canned folder list."""
+        return type(self).folders
+
+    def list_meetings(self, **kwargs):
+        """Return the canned listing for any window."""
+        return type(self).listing
+
+
+def _authorise(tmp_path, monkeypatch):
+    """Seed a credential file so verify does not skip the MCP check.
+
+    Args:
+        tmp_path: pytest temp directory.
+        monkeypatch: pytest fixture.
+    """
+    from granola_exporter.mcp_auth import FileTokenStorage
+
+    store = FileTokenStorage(tmp_path / "token.json", "https://mcp.granola.ai/mcp")
+    store._save(tokens={"access_token": "a" * 40}, obtained_at="2026-08-06T00:00:00+00:00")
+
+
+def test_verify_deep_defaults_to_off(capsys, tmp_path, monkeypatch):
+    """The cheap check is the default; --deep must be opted into."""
+    import granola_exporter.mcp_api as api
+
+    _authorise(tmp_path, monkeypatch)
+    _FakeMCPClient.folders = [{"title": "Projects", "note_count": 3}]
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+
+    assert main(["verify", "--source", "mcp"]) == 0
+    out = capsys.readouterr().out
+    assert "Projects" in out
+    assert "pass --deep" in out
+    assert "upstream meetings" not in out, "the default check must not scan windows"
+
+
+def test_verify_flags_a_folder_count_mismatch(capsys, tmp_path, monkeypatch):
+    """A folder Granola counts but we cannot retrieve is worth surfacing."""
+    import granola_exporter.mcp_api as api
+
+    _authorise(tmp_path, monkeypatch)
+    _FakeMCPClient.folders = [
+        {"title": "Career", "note_count": 56},
+        {"title": "Church", "note_count": 0},
+    ]
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+
+    main(["verify", "--source", "mcp"])
+    out = capsys.readouterr().out
+    assert "Career" in out and "differs" in out
+    assert "Church" in out
+
+
+def test_verify_without_mcp_credentials_skips_cleanly(capsys):
+    """Regression: this raised AttributeError on an unregistered --deep flag."""
+    assert main(["verify", "--source", "mcp"]) == 0
+    assert "not authorised" in capsys.readouterr().out
+
+
+def test_verify_deep_reports_no_gap_on_an_empty_archive(capsys, tmp_path, monkeypatch):
+    """An MCP that reports nothing leaves nothing un-archived."""
+    import granola_exporter.mcp_api as api
+
+    _authorise(tmp_path, monkeypatch)
+    _FakeMCPClient.folders = []
+    _FakeMCPClient.listing = (
+        "preamble\n\n"
+        '<meetings_data from="x" to="y" count="0"></meetings_data>'
+    )
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+
+    assert main(["verify", "--source", "mcp", "--deep"]) == 0
+    out = capsys.readouterr().out
+    assert "upstream meetings  : 0" in out
+    assert "gap                : none" in out
