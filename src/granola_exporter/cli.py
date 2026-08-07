@@ -16,14 +16,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from .models import Note, is_valid_note_id
-from .public_api import (
-    GranolaAPIError,
-    NoteNotFoundError,
-    PublicAPIClient,
-)
-from .render import render_note, render_transcript
-from .store import Archive, content_hash
+from .public_api import GranolaAPIError, PublicAPIClient
+from .store import Archive
+from .sync import SyncOptions, sync_public_api
 
 DEFAULT_ARCHIVE = "./archive"
 
@@ -38,19 +33,6 @@ def _config() -> tuple[str, Path]:
     api_key = os.environ.get("GRANOLA_API_KEY", "").strip()
     archive_dir = os.environ.get("GRANOLA_ARCHIVE_DIR", DEFAULT_ARCHIVE).strip()
     return api_key, Path(archive_dir).expanduser().resolve()
-
-
-def _stub_updated_at(stub: dict[str, Any]) -> str | None:
-    """Read a note stub's ``updated_at`` without parsing it.
-
-    Args:
-        stub: A note stub from the list endpoint.
-
-    Returns:
-        The raw ``updated_at`` string, or ``None`` when absent.
-    """
-    value = stub.get("updated_at")
-    return str(value) if value else None
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -119,106 +101,21 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return 1
 
     archive = Archive(archive_dir)
-    index = archive.load_index()
-    full = bool(args.full) or not archive.watermark
-    updated_after = None if full else archive.watermark
-
-    mode = "full backfill" if full else f"incremental since {updated_after}"
-    print(f"Syncing ({mode}) -> {archive_dir}")
-
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "skipped": 0, "failed": 0}
-    seen_ids: set[str] = set()
-    high_water: str | None = archive.watermark
-    detail_fetches = 0
+    opts = SyncOptions(full=bool(args.full), verbose=bool(args.verbose))
 
     try:
         with PublicAPIClient(api_key) as client:
-            for stub in client.iter_notes(updated_after=updated_after):
-                note_id = str(stub.get("id") or "")
-                if not note_id:
-                    continue
-                if not is_valid_note_id(note_id):
-                    # Ids build filesystem paths and request URLs, so a
-                    # malformed one is refused rather than sanitised.
-                    counts["skipped"] += 1
-                    print(
-                        f"  SKIP  malformed note id from API: {note_id!r}",
-                        file=sys.stderr,
-                    )
-                    continue
-                seen_ids.add(note_id)
-
-                stub_updated = _stub_updated_at(stub)
-                if stub_updated and (high_water is None or stub_updated > high_water):
-                    high_water = stub_updated
-
-                # Skip the detail call entirely when the stub proves nothing
-                # has changed. This is what makes a no-op re-sync cheap.
-                entry = index.get(note_id)
-                if (
-                    entry
-                    and stub_updated
-                    and entry.get("updated_at") == stub_updated
-                    and (archive.root / str(entry.get("path", ""))).is_dir()
-                ):
-                    counts["unchanged"] += 1
-                    continue
-
-                try:
-                    payload = client.get_note(note_id, include_transcript=True)
-                    detail_fetches += 1
-                except NoteNotFoundError:
-                    # Still processing, or has no summary/transcript yet.
-                    counts["skipped"] += 1
-                    if args.verbose:
-                        print(f"  skip  {note_id} — no summary/transcript yet")
-                    continue
-                except GranolaAPIError as exc:
-                    counts["failed"] += 1
-                    print(f"  FAIL  {note_id} — {exc}", file=sys.stderr)
-                    continue
-
-                note = Note.from_api(payload)
-                if not note.id:
-                    note.id = note_id
-
-                if archive.is_unchanged(note.id, content_hash(note.raw)):
-                    counts["unchanged"] += 1
-                    continue
-
-                transcript_md = render_transcript(note)
-                note_md = render_note(note, has_transcript_file=bool(transcript_md))
-                result = archive.write_note(note, note_md, transcript_md)
-                counts[result.status] += 1
-                if args.verbose:
-                    print(f"  {result.status:9} {note.display_title}")
+            counts = sync_public_api(archive, client, opts)
     except GranolaAPIError as exc:
+        # sync_public_api saved the index before re-raising.
         print(f"ERROR: {exc}", file=sys.stderr)
-        archive.save_index()
         return 1
     except KeyboardInterrupt:
         print("\nInterrupted — saving progress.", file=sys.stderr)
-        archive.save_index()
         return 130
 
-    if full:
-        newly_missing = archive.mark_upstream_missing(seen_ids)
-        if newly_missing:
-            print(
-                f"  {len(newly_missing)} archived note(s) no longer upstream "
-                "— flagged, not deleted."
-            )
-
-    archive.save_index()
-    if high_water and counts["failed"] == 0:
-        archive.save_state(updated_after=high_water)
-
-    print(
-        f"Done: {counts['new']} new, {counts['updated']} updated, "
-        f"{counts['unchanged']} unchanged, {counts['skipped']} skipped, "
-        f"{counts['failed']} failed ({detail_fetches} detail fetches)"
-    )
-    return 1 if counts["failed"] else 0
+    print(f"Done: {counts.summary()}")
+    return 1 if counts.failed else 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:

@@ -142,7 +142,7 @@ def test_rate_limiter_paces_beyond_burst(monkeypatch):
     """Once the burst is spent, the limiter sleeps instead of hammering."""
     slept = []
     monkeypatch.setattr(
-        "granola_exporter.public_api.time.sleep", lambda s: slept.append(s)
+        "granola_exporter.ratelimit.time.sleep", lambda s: slept.append(s)
     )
     limiter = RateLimiter(capacity=2, rate=5.0)
     for _ in range(2):

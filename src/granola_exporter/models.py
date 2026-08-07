@@ -66,8 +66,13 @@ def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _parse_dt(value: Any) -> datetime | None:
+def parse_timestamp(value: Any) -> datetime | None:
     """Parse an ISO 8601 timestamp as returned by the Granola API.
+
+    Also used to compare timestamps that have made a round trip through the
+    index, where ``datetime.isoformat`` renders UTC as ``+00:00`` rather than
+    the ``Z`` the API sends. Comparing the two as strings silently never
+    matches, so callers compare the parsed instants instead.
 
     Args:
         value: An ISO 8601 string, possibly ``Z``-suffixed, or ``None``.
@@ -175,8 +180,8 @@ class CalendarEvent:
             if isinstance(invitees, list)
             else [],
             calendar_event_id=_text(data.get("calendar_event_id")),
-            scheduled_start_time=_parse_dt(data.get("scheduled_start_time")),
-            scheduled_end_time=_parse_dt(data.get("scheduled_end_time")),
+            scheduled_start_time=parse_timestamp(data.get("scheduled_start_time")),
+            scheduled_end_time=parse_timestamp(data.get("scheduled_end_time")),
         )
 
 
@@ -242,8 +247,8 @@ class Utterance:
         return cls(
             speaker=Speaker.from_api(data.get("speaker")),
             text=_text(data.get("text")),
-            start_time=_parse_dt(data.get("start_time")),
-            end_time=_parse_dt(data.get("end_time")),
+            start_time=parse_timestamp(data.get("start_time")),
+            end_time=parse_timestamp(data.get("end_time")),
         )
 
 
@@ -283,8 +288,8 @@ class Note:
             id=_text(data.get("id")),
             title=_text(data.get("title")),
             owner=User.from_api(data.get("owner")),
-            created_at=_parse_dt(data.get("created_at")),
-            updated_at=_parse_dt(data.get("updated_at")),
+            created_at=parse_timestamp(data.get("created_at")),
+            updated_at=parse_timestamp(data.get("updated_at")),
             web_url=_text(data.get("web_url")),
             calendar_event=CalendarEvent.from_api(data.get("calendar_event")),
             attendees=[User.from_api(a) for a in attendees]
