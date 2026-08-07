@@ -290,15 +290,10 @@ def cmd_login(args: argparse.Namespace) -> int:
     from .mcp_auth import MCPAuthError
 
     config = _config()
-    if not sys.stdin.isatty() and not args.no_browser:
-        print(
-            "MCP authorisation needs a browser. Run 'granola-export login' on an\n"
-            "interactive terminal, or use --no-browser and forward the callback\n"
-            "port:  ssh -L <port>:127.0.0.1:<port> <host>",
-            file=sys.stderr,
-        )
-        return 1
-
+    # Deliberately no TTY check. This flow never reads stdin -- it opens a
+    # browser and waits on a loopback socket -- so a piped or captured stdin
+    # says nothing about whether authorisation can succeed. Whether a browser
+    # actually opens is discovered by trying, and the URL is printed either way.
     try:
         account = login(config.mcp_url, open_browser=not args.no_browser)
     except (MCPAuthError, MCPError) as exc:

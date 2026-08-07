@@ -381,16 +381,28 @@ class MCPClient:
                 "the Granola MCP needs re-authorisation — "
                 "run 'granola-export login'"
             )
-        print("\nAuthorise granola-exporter in your browser:")
-        print(f"  {url}\n")
-        if self.open_browser:
-            webbrowser.open(url)
-        else:
-            print("Waiting for the redirect. If this machine has no browser,")
+        # flush=True throughout: this runs on the worker thread and stdout may
+        # be a pipe, so without it the URL can sit in a buffer while the user
+        # stares at a silent terminal waiting for something to click.
+        print("\nAuthorise granola-exporter in your browser:", flush=True)
+        print(f"  {url}\n", flush=True)
+
+        opened = webbrowser.open(url) if self.open_browser else False
+        if not opened:
+            port = self._callback.port if self._callback else 0
             print(
-                f"forward the callback port:  ssh -L {self._callback.port}:"
-                f"127.0.0.1:{self._callback.port} <host>\n"
+                "Could not open a browser automatically — open the URL above.",
+                flush=True,
             )
+            print(
+                "If this machine has no browser, forward the callback port "
+                f"first:\n  ssh -L {port}:127.0.0.1:{port} <host>\n",
+                flush=True,
+            )
+        print(
+            f"Waiting up to {DEFAULT_CALLBACK_TIMEOUT:.0f}s for the redirect…",
+            flush=True,
+        )
 
     async def _callback_handler(self) -> Any:
         """Wait for the browser to hit the loopback redirect.
