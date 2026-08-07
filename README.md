@@ -174,6 +174,25 @@ single-use**. Any tool that refreshes that token invalidates the desktop app's
 copy and **logs you out of Granola**. If enrichment is added here, it must read
 the existing access token and never call the refresh endpoint.
 
+## Security
+
+The archive can contain highly sensitive meeting content, so:
+
+- Archive files are written `0600` and directories `0700` — owner-only, rather
+  than inheriting a typically world-readable umask. Set `chmod 600 .env` too;
+  it holds a live API key.
+- Note ids are validated against `^not_[a-zA-Z0-9]{14}$` before they are used to
+  build filesystem paths or request URLs, and every archive path is verified to
+  resolve inside the archive root. A malicious API response cannot write outside
+  the archive.
+- `index.json` is treated as untrusted input; entries resolving outside the
+  archive root are refused.
+- Neither `.env` nor `archive/` is ever committed.
+
+Dependencies are pinned in `uv.lock` and scanned against the OSV database by CI
+on every push and pull request, plus weekly. See [SECURITY.md](SECURITY.md) to
+report a vulnerability.
+
 ## Development
 
 ```bash
@@ -181,7 +200,8 @@ uv run pytest
 ```
 
 Tests run fully offline against recorded fixtures using `httpx.MockTransport` —
-no API key and no network required.
+no API key and no network required. `tests/test_security.py` holds regression
+tests for path containment, id validation, and file permissions.
 
 ## License
 

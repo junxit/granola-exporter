@@ -3,6 +3,20 @@ Changelog
 
 Unreleased
 ----------
+- Security: validate note ids against NOTE_ID_RE before using them to build
+  filesystem paths or request URLs. The regex was previously defined but never
+  enforced, allowing a malicious API response to write outside the archive
+  (confirmed by proof-of-concept at >=5 levels of traversal).
+- Security: every archive path now resolves through a containment check, so a
+  tampered or corrupted index.json cannot redirect writes (or shutil.move)
+  outside the archive root.
+- Security: archive files are written 0600 and directories 0700 instead of
+  inheriting the umask (typically world-readable 0644/0755). The archive can
+  contain sensitive meeting content.
+- Added tests/test_security.py with regression coverage for all of the above.
+- Added CI (pytest + osv-scanner against uv.lock, on push/PR and weekly),
+  Dependabot config, and SECURITY.md.
+- Audited all 13 pinned dependencies against OSV: 0 known vulnerabilities.
 - Renamed LICENSE to LICENSE.md so it renders as Markdown on GitHub.
 - License: switched from proprietary/all-rights-reserved to the PolyForm
   Noncommercial License 1.0.0 (source-available). Noncommercial use is free;

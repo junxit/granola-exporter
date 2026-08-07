@@ -25,6 +25,35 @@ UUID_RE = re.compile(
 )
 
 
+def is_valid_note_id(value: Any) -> bool:
+    """Check that a value is a well-formed public API note id.
+
+    Note ids are used to build filesystem paths and request URLs, so they are
+    validated before use rather than trusted. Anything not matching the exact
+    ``not_`` + 14 alphanumerics shape -- including any value containing a path
+    separator or ``..`` -- is rejected.
+
+    Args:
+        value: A candidate id from an API payload.
+
+    Returns:
+        ``True`` if the value is a well-formed note id.
+    """
+    return isinstance(value, str) and NOTE_ID_RE.fullmatch(value) is not None
+
+
+def is_valid_folder_id(value: Any) -> bool:
+    """Check that a value is a well-formed public API folder id.
+
+    Args:
+        value: A candidate id from an API payload.
+
+    Returns:
+        ``True`` if the value is a well-formed folder id.
+    """
+    return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
+
+
 def _text(value: Any) -> str:
     """Coerce an arbitrary API value to a stripped string.
 

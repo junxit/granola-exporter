@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .models import Note
+from .models import Note, is_valid_note_id
 
 INDEX_NAME = "index.json"
 STATE_NAME = ".sync-state.json"
@@ -39,6 +40,76 @@ TRANSCRIPT_NAME = "transcript.md"
 
 MAX_SLUG_LEN = 60
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+# The archive holds meeting transcripts and may contain sensitive personal
+# information, so it is kept readable only by its owner rather than inheriting
+# the process umask (typically 0644/0755, i.e. world-readable).
+FILE_MODE = 0o600
+DIR_MODE = 0o700
+
+
+class UnsafeArchivePathError(ValueError):
+    """Raised when a computed path would fall outside the archive root.
+
+    Note ids and index entries are attacker-influenced in the sense that they
+    come from the API or from a file on disk. Building paths from them without
+    a containment check would allow writes outside the archive.
+    """
+
+
+def _resolve_within(root: Path, *parts: str) -> Path:
+    """Join path components under ``root`` and verify the result stays inside.
+
+    Guards against both ``..`` traversal and absolute components -- note that
+    ``Path("/a") / "/etc"`` yields ``/etc``, silently discarding the base.
+
+    Args:
+        root: The archive root that the result must remain inside.
+        *parts: Path components to join beneath ``root``.
+
+    Returns:
+        The resolved path, guaranteed to be ``root`` or a descendant of it.
+
+    Raises:
+        UnsafeArchivePathError: If the joined path escapes ``root``.
+    """
+    root_resolved = root.resolve()
+    candidate = root_resolved.joinpath(*parts).resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise UnsafeArchivePathError(
+            f"path escapes the archive root: {'/'.join(parts)!r}"
+        )
+    return candidate
+
+
+def _secure_mkdir(path: Path) -> None:
+    """Create a directory tree, owner-accessible only.
+
+    ``Path.mkdir(mode=...)`` is subject to the umask, so the mode is applied
+    explicitly afterwards to each level created under the archive.
+
+    Args:
+        path: Directory to create.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+    try:
+        os.chmod(path, DIR_MODE)
+    except OSError:
+        pass
+
+
+def _secure_write_text(path: Path, text: str) -> None:
+    """Write text to ``path`` with owner-only permissions.
+
+    Args:
+        path: Destination file.
+        text: Contents to write.
+    """
+    path.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(path, FILE_MODE)
+    except OSError:
+        pass
 
 
 def slugify(title: str) -> str:
@@ -87,8 +158,11 @@ class Archive:
 
         Args:
             root: Directory the archive lives in; created on first write.
+                The path is resolved so that containment checks and
+                ``relative_to`` comparisons operate on a single canonical form
+                (on macOS, for example, ``/var`` resolves to ``/private/var``).
         """
-        self.root = root
+        self.root = Path(root).expanduser().resolve()
         self._index: dict[str, dict[str, Any]] | None = None
         self._state: dict[str, Any] | None = None
 
@@ -172,18 +246,23 @@ class Archive:
         Returns:
             A ``<root>/YYYY/MM/YYYY-MM-DD--slug--<id>`` path. Notes without a
             creation timestamp are filed under ``undated/``.
+
+        Raises:
+            UnsafeArchivePathError: If the note id is not a well-formed
+                ``not_*`` id, or the computed path would escape the archive.
         """
         created = note.created_at
-        stem = f"{slugify(note.display_title)}--{note.id}" if note.id else slugify(
-            note.display_title
-        )
+        slug = slugify(note.display_title)
+        if note.id and not is_valid_note_id(note.id):
+            raise UnsafeArchivePathError(f"malformed note id: {note.id!r}")
+        stem = f"{slug}--{note.id}" if note.id else slug
         if created is None:
-            return self.root / "undated" / stem
-        return (
-            self.root
-            / f"{created.year:04d}"
-            / f"{created.month:02d}"
-            / f"{created:%Y-%m-%d}--{stem}"
+            return _resolve_within(self.root, "undated", stem)
+        return _resolve_within(
+            self.root,
+            f"{created.year:04d}",
+            f"{created.month:02d}",
+            f"{created:%Y-%m-%d}--{stem}",
         )
 
     # -- writing -----------------------------------------------------------
@@ -203,7 +282,14 @@ class Archive:
         if not entry or entry.get("content_hash") != digest:
             return False
         path = entry.get("path")
-        return bool(path) and (self.root / str(path)).is_dir()
+        if not path:
+            return False
+        try:
+            return _resolve_within(self.root, str(path)).is_dir()
+        except UnsafeArchivePathError:
+            # A tampered or corrupted index must not be trusted to point
+            # outside the archive; treat it as "not archived" and re-fetch.
+            return False
 
     def write_note(
         self, note: Note, note_md: str, transcript_md: str | None
@@ -229,19 +315,24 @@ class Archive:
         target = self.note_dir(note)
 
         if previous and previous.get("path"):
-            old = self.root / str(previous["path"])
-            if old.is_dir() and old.resolve() != target.resolve():
-                target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                old = _resolve_within(self.root, str(previous["path"]))
+            except UnsafeArchivePathError:
+                # Never relocate based on an index entry pointing outside the
+                # archive; fall through and write the note fresh at `target`.
+                old = None
+            if old is not None and old.is_dir() and old != target:
+                _secure_mkdir(target.parent)
                 shutil.move(str(old), str(target))
 
-        target.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(target)
 
         _write_json(target / RAW_NAME, note.raw)
-        (target / NOTE_NAME).write_text(note_md, encoding="utf-8")
+        _secure_write_text(target / NOTE_NAME, note_md)
 
         transcript_file = target / TRANSCRIPT_NAME
         if transcript_md:
-            transcript_file.write_text(transcript_md, encoding="utf-8")
+            _secure_write_text(transcript_file, transcript_md)
         elif transcript_file.exists():
             # A transcript we already archived must survive upstream deletion.
             pass
@@ -315,10 +406,11 @@ def _write_json(path: Path, payload: Any) -> None:
         path: Destination file.
         payload: JSON-serialisable value.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
+    # Permissions are set on the temp file *before* the rename, so the final
+    # path is never briefly world-readable.
+    _secure_write_text(
+        tmp, json.dumps(payload, indent=2, ensure_ascii=False, default=str)
     )
     tmp.replace(path)

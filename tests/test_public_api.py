@@ -92,7 +92,7 @@ def test_404_raises_note_not_found():
 
     with _client(handler) as client:
         with pytest.raises(NoteNotFoundError):
-            client.get_note("not_missing")
+            client.get_note("not_mi55ingNote01x")
 
 
 def test_401_is_fatal():
@@ -103,7 +103,7 @@ def test_401_is_fatal():
 
     with _client(handler) as client:
         with pytest.raises(GranolaAPIError, match="401"):
-            client.get_note("not_x")
+            client.get_note("not_1d3tmYTlCICgjy")
 
 
 def test_get_note_requests_transcript():
@@ -112,10 +112,10 @@ def test_get_note_requests_transcript():
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["include"] = request.url.params.get("include")
-        return httpx.Response(200, json={"id": "not_x"})
+        return httpx.Response(200, json={"id": "not_1d3tmYTlCICgjy"})
 
     with _client(handler) as client:
-        client.get_note("not_x", include_transcript=True)
+        client.get_note("not_1d3tmYTlCICgjy", include_transcript=True)
     assert captured["include"] == "transcript"
 
 

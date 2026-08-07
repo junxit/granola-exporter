@@ -16,7 +16,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from .models import Note
+from .models import Note, is_valid_note_id
 from .public_api import (
     GranolaAPIError,
     NoteNotFoundError,
@@ -136,6 +136,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
             for stub in client.iter_notes(updated_after=updated_after):
                 note_id = str(stub.get("id") or "")
                 if not note_id:
+                    continue
+                if not is_valid_note_id(note_id):
+                    # Ids build filesystem paths and request URLs, so a
+                    # malformed one is refused rather than sanitised.
+                    counts["skipped"] += 1
+                    print(
+                        f"  SKIP  malformed note id from API: {note_id!r}",
+                        file=sys.stderr,
+                    )
                     continue
                 seen_ids.add(note_id)
 

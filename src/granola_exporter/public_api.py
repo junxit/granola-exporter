@@ -18,6 +18,8 @@ from typing import Any
 
 import httpx
 
+from .models import is_valid_note_id
+
 BASE_URL = "https://public-api.granola.ai/v1"
 
 BURST_CAPACITY = 25
@@ -289,7 +291,12 @@ class PublicAPIClient:
 
         Raises:
             NoteNotFoundError: If the note is missing or still processing.
+            GranolaAPIError: If ``note_id`` is not a well-formed ``not_*`` id.
+                It is validated before interpolation so that a malformed value
+                cannot alter the request path.
         """
+        if not is_valid_note_id(note_id):
+            raise GranolaAPIError(f"Refusing to request a malformed note id: {note_id!r}")
         return self._get(
             f"/notes/{note_id}",
             {"include": "transcript"} if include_transcript else None,
