@@ -24,6 +24,19 @@ UUID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Archive key for a note that only the MCP backend can see. Deliberately
+# stricter than NOTE_ID_RE: lowercase hex only, hyphens in exactly four fixed
+# positions, fully anchored. Nothing matching it can contain "/", "\", ".."
+# or a drive letter, so it is as safe to interpolate into a path as `not_*`.
+MCP_NOTE_ID_RE = re.compile(
+    r"^mcp_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+MCP_KEY_PREFIX = "mcp_"
+
+SOURCE_PUBLIC_API = "granola-public-api"
+SOURCE_MCP = "granola-mcp"
+
 
 def is_valid_note_id(value: Any) -> bool:
     """Check that a value is a well-formed public API note id.
@@ -52,6 +65,68 @@ def is_valid_folder_id(value: Any) -> bool:
         ``True`` if the value is a well-formed folder id.
     """
     return isinstance(value, str) and FOLDER_ID_RE.fullmatch(value) is not None
+
+
+def is_valid_uuid(value: Any) -> bool:
+    """Check that a value is a canonical lowercase UUID.
+
+    Applied to MCP meeting ids before they enter a request body or become an
+    archive key, mirroring how ``is_valid_note_id`` guards the public API.
+
+    Args:
+        value: A candidate meeting id from an MCP response.
+
+    Returns:
+        ``True`` if the value is a well-formed UUID.
+    """
+    return isinstance(value, str) and UUID_RE.fullmatch(value) is not None
+
+
+def is_valid_mcp_note_id(value: Any) -> bool:
+    """Check that a value is a well-formed MCP archive key.
+
+    Args:
+        value: A candidate archive key.
+
+    Returns:
+        ``True`` if the value matches ``mcp_`` plus a canonical UUID.
+    """
+    return isinstance(value, str) and MCP_NOTE_ID_RE.fullmatch(value) is not None
+
+
+def is_valid_archive_key(value: Any) -> bool:
+    """Check that a value is an id the archive may turn into a path.
+
+    This is the *only* validator that admits both namespaces. Transport-layer
+    validators stay narrow on purpose: ``public_api.get_note`` must keep
+    accepting ``not_*`` alone, because widening the archive-path check must
+    never widen what can be interpolated into a request URL.
+
+    Args:
+        value: A candidate archive key.
+
+    Returns:
+        ``True`` if the value is a well-formed ``not_*`` or ``mcp_*`` key.
+    """
+    return is_valid_note_id(value) or is_valid_mcp_note_id(value)
+
+
+def mcp_archive_key(meeting_id: Any) -> str | None:
+    """Turn an MCP meeting UUID into an archive key.
+
+    Args:
+        meeting_id: A meeting id from an MCP response.
+
+    Returns:
+        The ``mcp_<uuid>`` key, or ``None`` when the id is not a valid UUID.
+        Callers treat ``None`` as "skip this meeting" rather than sanitising.
+    """
+    if not isinstance(meeting_id, str):
+        return None
+    candidate = meeting_id.strip().lower()
+    if not is_valid_uuid(candidate):
+        return None
+    return f"{MCP_KEY_PREFIX}{candidate}"
 
 
 def _text(value: Any) -> str:
@@ -269,6 +344,9 @@ class Note:
     summary_markdown: str = ""
     transcript: list[Utterance] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    source: str = SOURCE_PUBLIC_API
+    degraded: bool = False
+    date_text: str = ""
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Note:
