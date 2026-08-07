@@ -3,6 +3,42 @@ Changelog
 
 Unreleased
 ----------
+- Added a second backend: the Granola MCP (https://mcp.granola.ai/mcp), which
+  works on every plan including free Basic, where public API keys require a
+  Business or Enterprise plan. Browser OAuth via `granola-export login`; token
+  stored 0600 outside the archive. New `login` / `logout` commands and a
+  `--source auto|public-api|mcp` flag.
+- MCP is a fallback that never downgrades: a note already archived from the
+  public API is never overwritten by MCP data, and when a key arrives later the
+  MCP entry is adopted in place (directory moved, key replaced) rather than
+  duplicated. The join key is the UUID in the public API's web_url, which the
+  index has recorded since the first release.
+- MCP notes are marked `source: granola-mcp` and `degraded: true`. They carry no
+  updated_at, no calendar event, no owner, and transcripts without timestamps;
+  change detection is rebuilt from a hash of the listing element plus a trailing
+  rescan window and a bounded rolling refresh. See README "MCP mode: what you
+  give up".
+- MCP responses are model-facing prose, not a versioned contract, so the parser
+  fails loudly on drift: the envelope's own `count` attribute is reconciled
+  against the elements parsed, and an unrecognised shape raises rather than
+  returning an empty window. Parsed without an XML parser, so entity expansion
+  and XXE are out of the threat model by construction.
+- Windows returning 50+ results are bisected and rescanned, since the MCP has no
+  pagination; a single day still at the cap is reported as possibly incomplete
+  rather than silently trusted.
+- Security: `store.note_dir` now accepts `mcp_<uuid>` keys, but the public API
+  client still refuses them before issuing a request. Widening the archive-path
+  validator deliberately did not widen the URL-path validator; there is a test
+  asserting it.
+- Fix: skipping an MCP transcript refetch used to drop it from raw.json, which
+  changed the content hash on every run and made every note look updated
+  forever. The archived transcript is now reloaded from disk instead.
+- .sync-state.json is namespaced per backend, keeping the legacy top-level
+  updated_after mirrored so an older build still reads the watermark.
+- Dependencies: added `mcp>=2.0`, taking the lockfile from 14 to 40 packages
+  (it brings its own HTTP stack, httpx2, plus an ASGI stack this tool never
+  runs). Audited against OSV: 0 known vulnerabilities. The SDK is confined
+  behind MCPClient and imported lazily, so the public API path loads none of it.
 - Fix: the stub-comparison fast path never fired. The index stores
   datetime.isoformat output ("...775000+00:00") while the API sends "...775Z",
   so comparing them as strings never matched and every note fell through to a
