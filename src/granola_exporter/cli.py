@@ -374,11 +374,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return 130
 
     print(f"Done: {counts.summary()}")
-    if counts.undated:
-        print(
-            f"  {counts.undated} note(s) had an unresolvable date and were filed "
-            "under undated/"
-        )
+    for warning in counts.warnings():
+        print(f"  WARNING: {warning}", file=sys.stderr)
     return 1 if counts.failed else 0
 
 

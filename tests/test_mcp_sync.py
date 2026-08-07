@@ -467,3 +467,25 @@ def test_second_run_uses_the_trailing_window(tmp_path):
     fake.calls.clear()
     sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
     assert fake.count("list_meetings") < first
+
+
+def test_transcript_failure_is_counted_and_warned(tmp_path, capsys):
+    """Regression: a lost transcript must never be silent.
+
+    A live backfill produced 66 notes with zero transcripts because every
+    fetch failed and the exception was swallowed under a verbose-only branch.
+    """
+
+    class NoTranscripts(FakeMCP):
+        def get_meeting_transcript(self, meeting_id):
+            raise RuntimeError("Rate limit exceeded")
+
+    fake = NoTranscripts([(_uuid(1), "Yoghurt sync", date(2026, 8, 1))])
+    counts = sync_mcp(
+        Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 1)), today=TODAY
+    )
+
+    assert counts.new == 1
+    assert counts.transcripts_failed == 1
+    assert "no transcript" in capsys.readouterr().err
+    assert any("WITHOUT a transcript" in w for w in counts.warnings())
