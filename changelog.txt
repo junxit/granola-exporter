@@ -1,8 +1,73 @@
 Changelog
 =========
 
-Unreleased
-----------
+0.2.0
+-----
+- Fix: MCP rate limiting arrives as a tool error (HTTP 200 with isError set),
+  not a 429, so nothing retried and a live backfill archived 66 notes with zero
+  transcripts. The client now recognises it and backs off 5/15/30/60s. Measured
+  live: get_meeting_transcript is still rejected at 20s spacing, far below the
+  ~100 req/min the docs quote, so a first backfill needs several passes.
+- Fix: get_meeting_transcript prefixes its JSON with the prompt-injection
+  preamble, so parsing from byte zero failed every time. `get_account_info` and
+  `list_meeting_folders` do not, so the payload is now located rather than
+  assumed to start at the first byte.
+- Fix: a failed transcript fetch was swallowed under a verbose-only branch,
+  which is how the above went unnoticed. Failures are now counted, warned on
+  stderr, and reported in the run summary; re-running sync retries exactly
+  those notes, since an archived transcript is never refetched.
+- Fix: `granola-export login` refused to run whenever stdin was not a TTY. The
+  flow never reads stdin -- it opens a browser and waits on a loopback socket --
+  so the check was simply the wrong signal, and it broke login under any wrapper
+  that runs commands non-interactively. It now always attempts the browser and
+  falls back to printing the URL, with output flushed so the URL appears
+  immediately even when stdout is a pipe.
+- Added a second backend: the Granola MCP (https://mcp.granola.ai/mcp), which
+  works on every plan including free Basic, where public API keys require a
+  Business or Enterprise plan. Browser OAuth via `granola-export login`; token
+  stored 0600 outside the archive. New `login` / `logout` commands and a
+  `--source auto|public-api|mcp` flag.
+- MCP is a fallback that never downgrades: a note already archived from the
+  public API is never overwritten by MCP data, and when a key arrives later the
+  MCP entry is adopted in place (directory moved, key replaced) rather than
+  duplicated. The join key is the UUID in the public API's web_url, which the
+  index has recorded since the first release.
+- MCP notes are marked `source: granola-mcp` and `degraded: true`. They carry no
+  updated_at, no calendar event, no owner, and transcripts without timestamps;
+  change detection is rebuilt from a hash of the listing element plus a trailing
+  rescan window and a bounded rolling refresh. See README "MCP mode: what you
+  give up".
+- MCP responses are model-facing prose, not a versioned contract, so the parser
+  fails loudly on drift: the envelope's own `count` attribute is reconciled
+  against the elements parsed, and an unrecognised shape raises rather than
+  returning an empty window. Parsed without an XML parser, so entity expansion
+  and XXE are out of the threat model by construction.
+- Windows returning 50+ results are bisected and rescanned, since the MCP has no
+  pagination; a single day still at the cap is reported as possibly incomplete
+  rather than silently trusted.
+- Security: `store.note_dir` now accepts `mcp_<uuid>` keys, but the public API
+  client still refuses them before issuing a request. Widening the archive-path
+  validator deliberately did not widen the URL-path validator; there is a test
+  asserting it.
+- Fix: skipping an MCP transcript refetch used to drop it from raw.json, which
+  changed the content hash on every run and made every note look updated
+  forever. The archived transcript is now reloaded from disk instead.
+- .sync-state.json is namespaced per backend, keeping the legacy top-level
+  updated_after mirrored so an older build still reads the watermark.
+- Dependencies: added `mcp>=2.0`, taking the lockfile from 14 to 40 packages
+  (it brings its own HTTP stack, httpx2, plus an ASGI stack this tool never
+  runs). Audited against OSV: 0 known vulnerabilities. The SDK is confined
+  behind MCPClient and imported lazily, so the public API path loads none of it.
+- Fix: the stub-comparison fast path never fired. The index stores
+  datetime.isoformat output ("...775000+00:00") while the API sends "...775Z",
+  so comparing them as strings never matched and every note fell through to a
+  detail fetch. Timestamps are now compared as instants. Measured on a 92-note
+  archive: "sync --full" went from 92 detail fetches to 0 (1.4s).
+- Refactor: extracted secure_io.py (0600/0700 primitives), ratelimit.py
+  (RateLimiter) and sync.py (sync_public_api) so the sync loop takes an
+  injected client. Groundwork for a second backend; no behaviour change.
+- Added tests/test_sync.py — the sync loop had no coverage while it lived
+  inside cli.cmd_sync.
 - Security: validate note ids against NOTE_ID_RE before using them to build
   filesystem paths or request URLs. The regex was previously defined but never
   enforced, allowing a malicious API response to write outside the archive
@@ -36,10 +101,30 @@ Unreleased
 Verified against a live account
 -------------------------------
 - Backfill: 89 notes in 33s; 89/89 with transcripts; 32,195 utterances.
-- Re-sync: 0 detail fetches, 0.57s.
+  (The archive has since grown to 92 notes, 92/92 with transcripts.)
+- Re-sync: 0 detail fetches, 0.57s. A full re-check ("sync --full") also costs
+  0 detail fetches in 1.4s once the stub timestamps are compared correctly.
 - Fidelity: an 18-month-old transcript matched the MCP reference exactly.
 - Reconciliation: 89 upstream, 89 archived, zero gap.
 - The public API exposes no audio, recording, attachment or panel field on any
   note, so those cannot be archived through the supported path.
 - One folder reference points at a note that no API path returns; see README
-  "Known limitations".
+  "Known limitations". The MCP sees the same discrepancy: it reports 56 notes
+  in the Career folder where 55 are archived, yet a full per-meeting scan finds
+  92 upstream and zero gap -- so the extra count is not a retrievable note.
+
+Both backends, verified against the same live account
+-----------------------------------------------------
+- Coverage: the MCP and the public API agree on 66 of 66 meetings created since
+  2026-01-01, with zero gap in either direction.
+- Layout: 65 of those 66 land on an identical date and slug through either
+  backend, so promoting an MCP note to a public API one renames in place rather
+  than moving it across dates.
+- Never downgrade: an MCP sync over a window containing six already-archived
+  meetings made zero detail fetches and left all 276 note.md, transcript.md and
+  raw.json files byte-identical.
+- Reconciliation: "verify --source mcp --deep" reports 92 upstream meetings in
+  19 listing calls, and no gap.
+- Transcripts are the practical constraint on an MCP backfill: get_meeting_
+  transcript is rejected even at 20s spacing, far below the ~100 requests/minute
+  the docs quote, so a first backfill needs several passes.

@@ -141,13 +141,23 @@ def render_note(note: Note, has_transcript_file: bool) -> str:
             ),
             "web_url": note.web_url or None,
             "has_transcript": bool(note.transcript),
-            "source": "granola-public-api",
+            "source": note.source,
+            # `_yaml_block` drops None but not False, so emitting
+            # `degraded: false` would rewrite the frontmatter of every
+            # public API note. Only degraded notes carry the key.
+            "degraded": True if note.degraded else None,
+            "date_text": note.date_text or None,
         }
     )
 
     parts = [frontmatter, "", f"# {note.display_title}", ""]
 
-    if note.created_at:
+    if note.date_text:
+        # The MCP reports a localised, minute-rounded time. Reformatting that
+        # into another timezone would be actively misleading, so it is printed
+        # exactly as the source gave it.
+        parts += [f"*{note.date_text}*", ""]
+    elif note.created_at:
         parts += [f"*{note.created_at:%A, %d %B %Y at %H:%M %Z}*".rstrip(), ""]
 
     if note.attendees:
@@ -166,10 +176,11 @@ def render_note(note: Note, has_transcript_file: bool) -> str:
 
     if has_transcript_file:
         count = len(note.transcript)
+        unit = "speaker turns, no timestamps" if note.degraded else "utterances"
         parts += [
             "## Transcript",
             "",
-            f"[Full transcript]({'transcript.md'}) — {count} utterances.",
+            f"[Full transcript]({'transcript.md'}) — {count} {unit}.",
             "",
         ]
 
@@ -203,7 +214,9 @@ def render_transcript(note: Note) -> str | None:
             "title": note.display_title,
             "created_at": note.created_at.isoformat() if note.created_at else None,
             "utterances": str(len(note.transcript)),
-            "source": "granola-public-api",
+            "source": note.source,
+            "degraded": True if note.degraded else None,
+            "timestamps": False if note.degraded else None,
         }
     )
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -30,22 +29,39 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .models import Note, is_valid_note_id
+from .models import (
+    SOURCE_MCP,
+    SOURCE_PUBLIC_API,
+    Note,
+    is_valid_archive_key,
+)
+from .secure_io import DIR_MODE, FILE_MODE
+from .secure_io import read_json as _read_json
+from .secure_io import secure_mkdir as _secure_mkdir
+from .secure_io import secure_write_text as _secure_write_text
+from .secure_io import write_json as _write_json
+
+# Re-exported: the 0600/0700 guarantee is documented in SECURITY.md and asserted
+# by tests against this module, so the names stay importable from here.
+__all__ = [
+    "DIR_MODE",
+    "FILE_MODE",
+    "Archive",
+    "SyncResult",
+    "UnsafeArchivePathError",
+    "content_hash",
+    "slugify",
+]
 
 INDEX_NAME = "index.json"
 STATE_NAME = ".sync-state.json"
+STATE_SCHEMA_VERSION = 2
 RAW_NAME = "raw.json"
 NOTE_NAME = "note.md"
 TRANSCRIPT_NAME = "transcript.md"
 
 MAX_SLUG_LEN = 60
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
-
-# The archive holds meeting transcripts and may contain sensitive personal
-# information, so it is kept readable only by its owner rather than inheriting
-# the process umask (typically 0644/0755, i.e. world-readable).
-FILE_MODE = 0o600
-DIR_MODE = 0o700
 
 
 class UnsafeArchivePathError(ValueError):
@@ -80,36 +96,6 @@ def _resolve_within(root: Path, *parts: str) -> Path:
             f"path escapes the archive root: {'/'.join(parts)!r}"
         )
     return candidate
-
-
-def _secure_mkdir(path: Path) -> None:
-    """Create a directory tree, owner-accessible only.
-
-    ``Path.mkdir(mode=...)`` is subject to the umask, so the mode is applied
-    explicitly afterwards to each level created under the archive.
-
-    Args:
-        path: Directory to create.
-    """
-    path.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
-    try:
-        os.chmod(path, DIR_MODE)
-    except OSError:
-        pass
-
-
-def _secure_write_text(path: Path, text: str) -> None:
-    """Write text to ``path`` with owner-only permissions.
-
-    Args:
-        path: Destination file.
-        text: Contents to write.
-    """
-    path.write_text(text, encoding="utf-8")
-    try:
-        os.chmod(path, FILE_MODE)
-    except OSError:
-        pass
 
 
 def slugify(title: str) -> str:
@@ -225,14 +211,62 @@ class Archive:
         state.update(updates)
         _write_json(self.state_path, state)
 
+    def source_state(self, source: str) -> dict[str, Any]:
+        """Read the sync state belonging to one backend.
+
+        Args:
+            source: A source constant such as ``granola-mcp``.
+
+        Returns:
+            That source's state mapping; empty when it has never synced.
+        """
+        sources = self.load_state().get("sources")
+        if not isinstance(sources, dict):
+            return {}
+        value = sources.get(source)
+        return value if isinstance(value, dict) else {}
+
+    def save_source_state(self, source: str, **updates: Any) -> None:
+        """Merge updates into one backend's sync state and persist.
+
+        The public API's ``updated_after`` is additionally mirrored to the
+        legacy top-level key, so an archive written by this build is still
+        readable by an older one.
+
+        Args:
+            source: The source these updates belong to.
+            **updates: Keys to set on that source's state mapping.
+        """
+        state = self.load_state()
+        sources = state.get("sources")
+        if not isinstance(sources, dict):
+            sources = {}
+        entry = sources.get(source)
+        if not isinstance(entry, dict):
+            entry = {}
+        entry.update(updates)
+        sources[source] = entry
+        state["sources"] = sources
+        state["schema_version"] = STATE_SCHEMA_VERSION
+        if source == SOURCE_PUBLIC_API and "updated_after" in updates:
+            state["updated_after"] = updates["updated_after"]
+        _write_json(self.state_path, state)
+        self._state = state
+
     @property
     def watermark(self) -> str | None:
-        """The ``updated_at`` high-water mark from the last successful sync.
+        """The ``updated_at`` high-water mark from the last public API sync.
+
+        Reads the namespaced location first and falls back to the legacy
+        top-level key, so an archive written before per-source state existed
+        keeps its watermark instead of silently triggering a full backfill.
 
         Returns:
             An ISO 8601 timestamp, or ``None`` if no sync has completed.
         """
-        value = self.load_state().get("updated_after")
+        value = self.source_state(SOURCE_PUBLIC_API).get("updated_after")
+        if not value:
+            value = self.load_state().get("updated_after")
         return str(value) if value else None
 
     # -- paths -------------------------------------------------------------
@@ -249,11 +283,12 @@ class Archive:
 
         Raises:
             UnsafeArchivePathError: If the note id is not a well-formed
-                ``not_*`` id, or the computed path would escape the archive.
+                ``not_*`` or ``mcp_*`` key, or the computed path would escape
+                the archive.
         """
         created = note.created_at
         slug = slugify(note.display_title)
-        if note.id and not is_valid_note_id(note.id):
+        if note.id and not is_valid_archive_key(note.id):
             raise UnsafeArchivePathError(f"malformed note id: {note.id!r}")
         stem = f"{slug}--{note.id}" if note.id else slug
         if created is None:
@@ -292,7 +327,14 @@ class Archive:
             return False
 
     def write_note(
-        self, note: Note, note_md: str, transcript_md: str | None
+        self,
+        note: Note,
+        note_md: str,
+        transcript_md: str | None,
+        *,
+        source: str = SOURCE_PUBLIC_API,
+        digest: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> SyncResult:
         """Write a note's raw payload and rendered Markdown into the archive.
 
@@ -306,6 +348,11 @@ class Archive:
             note_md: Rendered ``note.md`` contents.
             transcript_md: Rendered ``transcript.md`` contents, or ``None``
                 when the note has no transcript.
+            source: Provenance recorded on the index entry.
+            digest: Content hash to record. Defaults to hashing the whole
+                payload; the MCP backend passes a hash over the verbatim tool
+                output alone, so derived fields cannot trigger a rewrite.
+            extra: Source-specific keys merged into the index entry.
 
         Returns:
             The outcome for this note.
@@ -337,7 +384,7 @@ class Archive:
             # A transcript we already archived must survive upstream deletion.
             pass
 
-        index[note.id] = {
+        entry: dict[str, Any] = {
             "path": str(target.relative_to(self.root)),
             "title": note.display_title,
             "uuid": note.uuid,
@@ -345,10 +392,16 @@ class Archive:
             "updated_at": note.updated_at.isoformat() if note.updated_at else None,
             "folders": [f.name for f in note.folder_membership],
             "has_transcript": bool(note.transcript),
-            "content_hash": content_hash(note.raw),
+            "content_hash": digest if digest is not None else content_hash(note.raw),
             "archived_at": datetime.now().astimezone().isoformat(),
             "upstream_missing": False,
+            "source": source,
         }
+        if note.degraded:
+            entry["degraded"] = True
+        if extra:
+            entry.update(extra)
+        index[note.id] = entry
         self._index = index
         return SyncResult(
             note_id=note.id,
@@ -356,7 +409,74 @@ class Archive:
             status="updated" if previous else "new",
         )
 
-    def mark_upstream_missing(self, note_ids: set[str]) -> list[str]:
+    def archived_source(self, note_id: str) -> str:
+        """The provenance recorded for an archived note.
+
+        Entries written before provenance tracking carry no ``source`` field
+        and are, correctly, public API notes.
+
+        Args:
+            note_id: An archive key.
+
+        Returns:
+            The source constant for that note.
+        """
+        entry = self.load_index().get(note_id) or {}
+        return str(entry.get("source") or SOURCE_PUBLIC_API)
+
+    def uuid_index(self) -> dict[str, list[str]]:
+        """Map each archived note's UUID to the archive key(s) holding it.
+
+        A UUID mapping to more than one key means the same meeting is archived
+        twice, which is the invariant ``verify`` reports on and the reason
+        ``adopt_mcp_entry`` exists.
+
+        Returns:
+            A mapping of UUID to the archive keys carrying it.
+        """
+        mapping: dict[str, list[str]] = {}
+        for note_id, entry in self.load_index().items():
+            uuid = entry.get("uuid")
+            if isinstance(uuid, str) and uuid:
+                mapping.setdefault(uuid.lower(), []).append(note_id)
+        return mapping
+
+    def adopt_mcp_entry(self, note: Note) -> str | None:
+        """Retire an MCP-sourced entry that the public API now covers.
+
+        Seeds the ``not_*`` index entry with the MCP entry's ``path`` so that
+        ``write_note``'s existing, containment-checked relocation moves the
+        directory instead of leaving a duplicate behind, then drops the
+        ``mcp_*`` key.
+
+        Args:
+            note: A freshly fetched public API note.
+
+        Returns:
+            The retired archive key, or ``None`` when nothing was adopted.
+        """
+        if not note.uuid or not note.id:
+            return None
+        index = self.load_index()
+        if note.id in index:
+            return None
+        for key in list(index):
+            entry = index[key]
+            if key == note.id or not key.startswith("mcp_"):
+                continue
+            if str(entry.get("uuid") or "").lower() != note.uuid:
+                continue
+            path = entry.get("path")
+            if path:
+                index[note.id] = {"path": path}
+            del index[key]
+            self._index = index
+            return key
+        return None
+
+    def mark_upstream_missing(
+        self, note_ids: set[str], *, source: str | None = None
+    ) -> list[str]:
         """Flag archived notes that no longer appear upstream.
 
         Nothing is deleted. The flag records that Granola no longer serves the
@@ -364,6 +484,9 @@ class Archive:
 
         Args:
             note_ids: Ids seen in the current full listing.
+            source: When given, only entries from this source are considered.
+                Without it, a full MCP scan would flag every public API note as
+                missing, since the two backends see different id namespaces.
 
         Returns:
             The ids newly flagged as missing.
@@ -371,6 +494,8 @@ class Archive:
         index = self.load_index()
         newly_missing = []
         for note_id, entry in index.items():
+            if source is not None and self.archived_source(note_id) != source:
+                continue
             missing = note_id not in note_ids
             if missing and not entry.get("upstream_missing"):
                 entry["upstream_missing"] = True
@@ -381,36 +506,3 @@ class Archive:
                 entry.pop("missing_since", None)
         self._index = index
         return newly_missing
-
-
-def _read_json(path: Path, default: Any) -> Any:
-    """Read a JSON file, tolerating absence and corruption.
-
-    Args:
-        path: File to read.
-        default: Value to return when the file is missing or unparseable.
-
-    Returns:
-        The decoded contents, or ``default``.
-    """
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    """Write JSON atomically, so an interrupted run cannot truncate the file.
-
-    Args:
-        path: Destination file.
-        payload: JSON-serialisable value.
-    """
-    _secure_mkdir(path.parent)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    # Permissions are set on the temp file *before* the rename, so the final
-    # path is never briefly world-readable.
-    _secure_write_text(
-        tmp, json.dumps(payload, indent=2, ensure_ascii=False, default=str)
-    )
-    tmp.replace(path)
