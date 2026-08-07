@@ -38,6 +38,7 @@ from .mcp_auth import (
     redact,
     token_store_path,
 )
+from . import USER_AGENT
 from .models import is_valid_uuid
 from .ratelimit import RateLimiter
 
@@ -412,7 +413,11 @@ class MCPClient:
             callback_handler=self._callback_handler,
         )
 
-        async with httpx2.AsyncClient(auth=provider, timeout=self.timeout) as http:
+        async with httpx2.AsyncClient(
+            auth=provider,
+            timeout=self.timeout,
+            headers={"User-Agent": USER_AGENT},
+        ) as http:
             async with streamable_http_client(
                 self.server_url, http_client=http
             ) as (read, write):

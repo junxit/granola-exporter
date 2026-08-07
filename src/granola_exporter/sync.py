@@ -797,3 +797,34 @@ def _archived_transcript(archive: Archive, entry: dict[str, Any]) -> MCPTranscri
         title=str(block.get("title") or ""),
         text=str(block.get("transcript") or ""),
     )
+
+
+def scan_mcp_meeting_ids(
+    client: MCPProtocol,
+    start: date,
+    end: date,
+    *,
+    window_days: int = LISTING_WINDOW_DAYS,
+) -> tuple[set[str], int]:
+    """Collect every meeting id the MCP reports across a date range.
+
+    Backend traversal lives here rather than in the CLI, so ``verify`` gets the
+    same bisect-on-suspicion scan ``sync_mcp`` uses -- a reconcile that silently
+    read a truncated listing would report a clean archive that is not.
+
+    Args:
+        client: The MCP backend.
+        start: Inclusive first date.
+        end: Inclusive last date.
+        window_days: Window width.
+
+    Returns:
+        The meeting ids seen, and the number of listing calls spent so the
+        caller can report its own cost.
+    """
+    counts = SyncCounts()
+    seen: set[str] = set()
+    for window_start, window_end in _iter_windows(start, end, window_days):
+        for meeting in _scan_window(client, window_start, window_end, counts):
+            seen.add(meeting.meeting_id)
+    return seen, counts.list_calls

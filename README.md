@@ -195,7 +195,7 @@ want it tracked.
 
 ## Known limitations
 
-These were measured against a real 89-note archive, not assumed.
+These were measured against a real 92-note archive, not assumed.
 
 - **No audio, and no panels.** The public API returns exactly these fields:
   `id`, `object`, `title`, `web_url`, `owner`, `created_at`, `updated_at`,

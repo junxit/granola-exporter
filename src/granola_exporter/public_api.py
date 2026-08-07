@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from . import USER_AGENT
 from .models import is_valid_note_id
 from .ratelimit import RateLimiter
 
@@ -88,7 +89,7 @@ class PublicAPIClient:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
-                "User-Agent": "granola-exporter/0.1.0",
+                "User-Agent": USER_AGENT,
             },
         )
 

@@ -1,8 +1,8 @@
 Changelog
 =========
 
-Unreleased
-----------
+0.2.0
+-----
 - Fix: MCP rate limiting arrives as a tool error (HTTP 200 with isError set),
   not a 429, so nothing retried and a live backfill archived 66 notes with zero
   transcripts. The client now recognises it and backs off 5/15/30/60s. Measured
@@ -101,10 +101,30 @@ Unreleased
 Verified against a live account
 -------------------------------
 - Backfill: 89 notes in 33s; 89/89 with transcripts; 32,195 utterances.
-- Re-sync: 0 detail fetches, 0.57s.
+  (The archive has since grown to 92 notes, 92/92 with transcripts.)
+- Re-sync: 0 detail fetches, 0.57s. A full re-check ("sync --full") also costs
+  0 detail fetches in 1.4s once the stub timestamps are compared correctly.
 - Fidelity: an 18-month-old transcript matched the MCP reference exactly.
 - Reconciliation: 89 upstream, 89 archived, zero gap.
 - The public API exposes no audio, recording, attachment or panel field on any
   note, so those cannot be archived through the supported path.
 - One folder reference points at a note that no API path returns; see README
-  "Known limitations".
+  "Known limitations". The MCP sees the same discrepancy: it reports 56 notes
+  in the Career folder where 55 are archived, yet a full per-meeting scan finds
+  92 upstream and zero gap -- so the extra count is not a retrievable note.
+
+Both backends, verified against the same live account
+-----------------------------------------------------
+- Coverage: the MCP and the public API agree on 66 of 66 meetings created since
+  2026-01-01, with zero gap in either direction.
+- Layout: 65 of those 66 land on an identical date and slug through either
+  backend, so promoting an MCP note to a public API one renames in place rather
+  than moving it across dates.
+- Never downgrade: an MCP sync over a window containing six already-archived
+  meetings made zero detail fetches and left all 276 note.md, transcript.md and
+  raw.json files byte-identical.
+- Reconciliation: "verify --source mcp --deep" reports 92 upstream meetings in
+  19 listing calls, and no gap.
+- Transcripts are the practical constraint on an MCP backfill: get_meeting_
+  transcript is rejected even at 20s spacing, far below the ~100 requests/minute
+  the docs quote, so a first backfill needs several passes.
