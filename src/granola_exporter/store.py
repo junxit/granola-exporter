@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -31,6 +30,23 @@ from pathlib import Path
 from typing import Any
 
 from .models import Note, is_valid_note_id
+from .secure_io import DIR_MODE, FILE_MODE
+from .secure_io import read_json as _read_json
+from .secure_io import secure_mkdir as _secure_mkdir
+from .secure_io import secure_write_text as _secure_write_text
+from .secure_io import write_json as _write_json
+
+# Re-exported: the 0600/0700 guarantee is documented in SECURITY.md and asserted
+# by tests against this module, so the names stay importable from here.
+__all__ = [
+    "DIR_MODE",
+    "FILE_MODE",
+    "Archive",
+    "SyncResult",
+    "UnsafeArchivePathError",
+    "content_hash",
+    "slugify",
+]
 
 INDEX_NAME = "index.json"
 STATE_NAME = ".sync-state.json"
@@ -40,12 +56,6 @@ TRANSCRIPT_NAME = "transcript.md"
 
 MAX_SLUG_LEN = 60
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
-
-# The archive holds meeting transcripts and may contain sensitive personal
-# information, so it is kept readable only by its owner rather than inheriting
-# the process umask (typically 0644/0755, i.e. world-readable).
-FILE_MODE = 0o600
-DIR_MODE = 0o700
 
 
 class UnsafeArchivePathError(ValueError):
@@ -80,36 +90,6 @@ def _resolve_within(root: Path, *parts: str) -> Path:
             f"path escapes the archive root: {'/'.join(parts)!r}"
         )
     return candidate
-
-
-def _secure_mkdir(path: Path) -> None:
-    """Create a directory tree, owner-accessible only.
-
-    ``Path.mkdir(mode=...)`` is subject to the umask, so the mode is applied
-    explicitly afterwards to each level created under the archive.
-
-    Args:
-        path: Directory to create.
-    """
-    path.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
-    try:
-        os.chmod(path, DIR_MODE)
-    except OSError:
-        pass
-
-
-def _secure_write_text(path: Path, text: str) -> None:
-    """Write text to ``path`` with owner-only permissions.
-
-    Args:
-        path: Destination file.
-        text: Contents to write.
-    """
-    path.write_text(text, encoding="utf-8")
-    try:
-        os.chmod(path, FILE_MODE)
-    except OSError:
-        pass
 
 
 def slugify(title: str) -> str:
@@ -381,36 +361,3 @@ class Archive:
                 entry.pop("missing_since", None)
         self._index = index
         return newly_missing
-
-
-def _read_json(path: Path, default: Any) -> Any:
-    """Read a JSON file, tolerating absence and corruption.
-
-    Args:
-        path: File to read.
-        default: Value to return when the file is missing or unparseable.
-
-    Returns:
-        The decoded contents, or ``default``.
-    """
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    """Write JSON atomically, so an interrupted run cannot truncate the file.
-
-    Args:
-        path: Destination file.
-        payload: JSON-serialisable value.
-    """
-    _secure_mkdir(path.parent)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    # Permissions are set on the temp file *before* the rename, so the final
-    # path is never briefly world-readable.
-    _secure_write_text(
-        tmp, json.dumps(payload, indent=2, ensure_ascii=False, default=str)
-    )
-    tmp.replace(path)

@@ -3,6 +3,16 @@ Changelog
 
 Unreleased
 ----------
+- Fix: the stub-comparison fast path never fired. The index stores
+  datetime.isoformat output ("...775000+00:00") while the API sends "...775Z",
+  so comparing them as strings never matched and every note fell through to a
+  detail fetch. Timestamps are now compared as instants. Measured on a 92-note
+  archive: "sync --full" went from 92 detail fetches to 0 (1.4s).
+- Refactor: extracted secure_io.py (0600/0700 primitives), ratelimit.py
+  (RateLimiter) and sync.py (sync_public_api) so the sync loop takes an
+  injected client. Groundwork for a second backend; no behaviour change.
+- Added tests/test_sync.py — the sync loop had no coverage while it lived
+  inside cli.cmd_sync.
 - Security: validate note ids against NOTE_ID_RE before using them to build
   filesystem paths or request URLs. The regex was previously defined but never
   enforced, allowing a malicious API response to write outside the archive
