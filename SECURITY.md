@@ -32,7 +32,7 @@ meeting transcripts to disk, so the concerns that matter most are:
 - **The OAuth redirect.** The loopback listener binds `127.0.0.1` explicitly,
   serves exactly one request on `/callback`, refuses any other path, and never
   reflects query parameters into the response body. Only `granola-export login`
-  ever starts an authorisation flow; `sync` and `doctor` will not.
+  ever starts an authorization flow; `sync` and `doctor` will not.
 - **Untrusted API responses.** Ids are validated before being used to build
   filesystem paths or request URLs — `^not_[a-zA-Z0-9]{14}$` for the public API,
   and `^mcp_` plus a canonical lowercase UUID for MCP notes — and every archive

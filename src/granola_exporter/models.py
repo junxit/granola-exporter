@@ -119,7 +119,7 @@ def mcp_archive_key(meeting_id: Any) -> str | None:
 
     Returns:
         The ``mcp_<uuid>`` key, or ``None`` when the id is not a valid UUID.
-        Callers treat ``None`` as "skip this meeting" rather than sanitising.
+        Callers treat ``None`` as "skip this meeting" rather than sanitizing.
     """
     if not isinstance(meeting_id, str):
         return None
@@ -229,6 +229,13 @@ class CalendarEvent:
     """The calendar event a note was captured against."""
 
     event_title: str = ""
+    # Deliberately British, against this project's US-English convention.
+    # Granola's API spells the JSON key "organiser", so `_parse` must look it up
+    # under that exact name, and `render` emits it verbatim as a `note.md`
+    # frontmatter key -- 77 archived notes already carry it. Americanizing the
+    # attribute alone would leave it mismatched with both; Americanizing all
+    # three would break payload parsing and split the archive across two key
+    # spellings. Left as-is on purpose; please do not "correct" it.
     organiser: str = ""
     invitees: list[str] = field(default_factory=list)
     calendar_event_id: str = ""

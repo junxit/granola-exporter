@@ -46,7 +46,7 @@ class FakeMCP:
     """An in-memory MCP backend built from a list of meetings."""
 
     def __init__(self, meetings, folders=None, transcripts=None) -> None:
-        """Initialise the fake.
+        """Initialize the fake.
 
         Args:
             meetings: ``(uuid, title, date)`` triples.
@@ -201,7 +201,7 @@ def test_backfill_archives_a_meeting(tmp_path):
     note_md = (directory / "note.md").read_text(encoding="utf-8")
     assert 'source: "granola-mcp"' in note_md
     assert "degraded: true" in note_md
-    assert "Aug 1, 2026 9:30 AM CST" in note_md, "the localised time is shown verbatim"
+    assert "Aug 1, 2026 9:30 AM CST" in note_md, "the localized time is shown verbatim"
 
 
 def test_transcript_is_rendered_without_timestamps(tmp_path):

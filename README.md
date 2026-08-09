@@ -32,7 +32,7 @@ only supported path to the same data.
 | --- | --- | --- |
 | Plan required | Business / Enterprise | **All plans, incl. free** |
 | Auth | `grn_` key in `.env` | Browser OAuth (`granola-export login`) |
-| Timestamps | ISO 8601 `created_at` + `updated_at` | localised, minute-rounded; **no `updated_at`** |
+| Timestamps | ISO 8601 `created_at` + `updated_at` | localized, minute-rounded; **no `updated_at`** |
 | Incremental | `updated_after` + cursor paging | date windows + content hashing |
 | Transcripts | diarized, timestamped utterances | flat text, speaker labels only |
 | Folders | inline on every note | one extra listing per folder |
@@ -87,7 +87,7 @@ cp .env.example .env
 **Settings → Connectors → Personal API Keys → Create new key**; it starts with
 `grn_`. Paste it into `.env`.
 
-**Without an API key** — authorise the MCP instead. This opens a browser once
+**Without an API key** — authorize the MCP instead. This opens a browser once
 and stores a token in `~/.local/state/granola-exporter/` (mode `0600`), outside
 the archive so backing the archive up never carries credentials:
 
@@ -132,7 +132,7 @@ uv run granola-export sync --source mcp --since 2025-01-01
 | Command | Purpose |
 | --- | --- |
 | `doctor` | Validate credentials, backend reachability and archive location |
-| `login` | Authorise the Granola MCP in a browser (`--no-browser`) |
+| `login` | Authorize the Granola MCP in a browser (`--no-browser`) |
 | `logout` | Remove the stored MCP credentials |
 | `sync` | Fetch new and changed meetings (`--full`, `-v`, `--source`, `--since`, `--window`, `--refresh-batch`) |
 | `verify` | Check on-disk integrity, provenance and duplicates; reconcile upstream |
@@ -147,7 +147,7 @@ stopped working without telling you.
 archive/
   2026/01/2026-01-27--quarterly-yoghurt-budget--not_1d3tmYTlCICgjy/
     note.md          # YAML frontmatter, summary, attendees, folders
-    transcript.md    # speaker-labelled, timestamped, runs merged
+    transcript.md    # speaker-labeled, timestamped, runs merged
     raw.json         # verbatim API payload
   index.json         # id -> path, dates, folders, content hash
   .sync-state.json   # updated_at watermark
@@ -203,7 +203,7 @@ These were measured against a real 92-note archive, not assumed.
   `transcript`, `summary_text`, `summary_markdown`. There is no audio,
   recording, media, attachment or panel field on any note. Retrieving those
   would require the unsupported internal API — see below.
-- **Only summarised notes are returned.** The API serves notes that have both a
+- **Only summarized notes are returned.** The API serves notes that have both a
   generated summary and a transcript; notes still processing return 404 and are
   counted as `skipped`.
 - **Owner-scoped.** The API returns notes you own. A note shared into one of
@@ -221,7 +221,7 @@ These were measured against a real 92-note archive, not assumed.
   If `verify` reports a clean gap check, the archive is complete with respect
   to everything retrievable, even when Granola's own folder counts disagree.
 - Rate limits are 25 requests / 5s burst and 5 requests/second sustained. The
-  client paces itself with a token bucket and honours `Retry-After`.
+  client paces itself with a token bucket and honors `Retry-After`.
 
 ### MCP mode: what you give up
 
@@ -249,11 +249,11 @@ API key, use it — this backend exists for accounts that cannot get one.
   public API   **[04:12] Oat Benson**
   MCP          **Them**
   ```
-- **Dates are localised and minute-rounded.** The MCP reports a meeting's
+- **Dates are localized and minute-rounded.** The MCP reports a meeting's
   *scheduled start in local time* (`Jul 28, 2026 8:00 PM CDT`) where the public
   API reports `created_at` in UTC. Notes are filed under the resolved UTC date
   so both backends agree, and the original string is preserved verbatim in
-  frontmatter as `date_text`. An unrecognised timezone abbreviation leaves the
+  frontmatter as `date_text`. An unrecognized timezone abbreviation leaves the
   note **undated** rather than guessing — a visibly undated note is a better
   failure than a confidently wrong one.
 - **No owner, calendar event, or `web_url`.** `web_url` is synthesised from the

@@ -15,7 +15,7 @@ class RateLimiter:
     """Token bucket pacing requests to a documented burst and sustained rate."""
 
     def __init__(self, capacity: int, rate: float) -> None:
-        """Initialise a full bucket.
+        """Initialize a full bucket.
 
         Args:
             capacity: Maximum burst size, in requests.

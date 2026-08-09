@@ -297,7 +297,7 @@ def test_mcp_archive_key_builds_only_from_valid_uuids():
     assert (
         mcp_archive_key("E96C1C66-ED02-4A32-9ACD-54720F8761B1")
         == "mcp_e96c1c66-ed02-4a32-9acd-54720f8761b1"
-    ), "ids are normalised to lowercase so one meeting yields one key"
+    ), "ids are normalized to lowercase so one meeting yields one key"
     for bad in ["../../etc", "", None, "not_1d3tmYTlCICgjy", "abc", 42]:
         assert mcp_archive_key(bad) is None
 

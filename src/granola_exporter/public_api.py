@@ -43,7 +43,7 @@ class GranolaAPIError(RuntimeError):
     """Raised when the Granola API returns an unrecoverable error."""
 
     def __init__(self, message: str, status_code: int | None = None) -> None:
-        """Initialise the error.
+        """Initialize the error.
 
         Args:
             message: Human-readable description of the failure.
@@ -67,7 +67,7 @@ class PublicAPIClient:
     def __init__(
         self, api_key: str, base_url: str = BASE_URL, timeout: float = 30.0
     ) -> None:
-        """Initialise the client.
+        """Initialize the client.
 
         Args:
             api_key: A Granola API key, expected to start with ``grn_``.
@@ -287,7 +287,7 @@ class PublicAPIClient:
 
         Returns:
             A list of folder dictionaries; empty if the response shape is
-            unrecognised.
+            unrecognized.
         """
         data = self._get("/folders")
         if isinstance(data, list):

@@ -56,7 +56,7 @@ def _seed(store: FileTokenStorage, **tokens) -> None:
 # -- location and permissions ----------------------------------------------
 
 
-def test_token_path_honours_overrides(monkeypatch, tmp_path):
+def test_token_path_honors_overrides(monkeypatch, tmp_path):
     """The cache lives outside the archive, and is overridable."""
     monkeypatch.delenv("GRANOLA_MCP_TOKEN_FILE", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
@@ -218,7 +218,7 @@ def test_callback_does_not_reflect_query_parameters():
 
 
 def test_callback_surfaces_a_provider_error():
-    """A refused authorisation is an error, not a silent hang."""
+    """A refused authorization is an error, not a silent hang."""
     with LoopbackCallbackServer() as server:
 
         def visit() -> None:

@@ -57,7 +57,7 @@ def test_undated_notes_are_filed_separately(tmp_path: Path, note_payload):
 
 
 def test_unchanged_detection(tmp_path: Path, note_payload):
-    """An identical payload is recognised as unchanged."""
+    """An identical payload is recognized as unchanged."""
     archive = Archive(tmp_path)
     note = _write(archive, note_payload)
     assert archive.is_unchanged(note.id, content_hash(note.raw))

@@ -2,7 +2,7 @@
 
 Commands:
     doctor  Validate configuration and backend reachability.
-    login   Authorise the Granola MCP in a browser.
+    login   Authorize the Granola MCP in a browser.
     logout  Remove the stored MCP credentials.
     sync    Back up new and changed meetings into the archive.
     verify  Check archive integrity and reconcile against a backend.
@@ -130,7 +130,7 @@ def _parse_since(value: str | None) -> date | None:
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Report configuration, credentials and backend reachability.
 
-    Never opens a browser and never starts an authorisation flow: a diagnostic
+    Never opens a browser and never starts an authorization flow: a diagnostic
     that mutates credentials is not a diagnostic.
 
     Args:
@@ -232,7 +232,7 @@ def _doctor_public_api(config: Config) -> bool:
 
 
 def _doctor_mcp(config: Config) -> bool:
-    """Check MCP credentials and, when authorised, reachability.
+    """Check MCP credentials and, when authorized, reachability.
 
     Args:
         config: The loaded configuration.
@@ -278,7 +278,7 @@ def _doctor_mcp(config: Config) -> bool:
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    """Run the interactive MCP authorisation flow.
+    """Run the interactive MCP authorization flow.
 
     Args:
         args: Parsed command-line arguments.
@@ -292,7 +292,7 @@ def cmd_login(args: argparse.Namespace) -> int:
     config = _config()
     # Deliberately no TTY check. This flow never reads stdin -- it opens a
     # browser and waits on a loopback socket -- so a piped or captured stdin
-    # says nothing about whether authorisation can succeed. Whether a browser
+    # says nothing about whether authorization can succeed. Whether a browser
     # actually opens is discovered by trying, and the URL is printed either way.
     try:
         account = login(config.mcp_url, open_browser=not args.no_browser)
@@ -300,7 +300,7 @@ def cmd_login(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Authorised as {account.get('email', '?')}")
+    print(f"Authorized as {account.get('email', '?')}")
     workspace = account.get("active_workspace") or {}
     if workspace:
         print(f"Workspace: {workspace.get('display_name', '?')}")
@@ -391,7 +391,7 @@ def _sync_via_mcp(archive: Archive, config: Config, opts: SyncOptions):
         The per-note tally.
 
     Raises:
-        SystemExit: If the MCP is not authorised, or the sync fails. The
+        SystemExit: If the MCP is not authorized, or the sync fails. The
             message names the remedy rather than dumping a stack trace.
     """
     from .mcp_api import MCPClient, MCPError
@@ -534,7 +534,7 @@ def _verify_against_mcp(
 
     storage = _mcp_storage(config)
     if not storage.status().present:
-        print("  upstream check     : skipped (not authorised — run 'login')")
+        print("  upstream check     : skipped (not authorized — run 'login')")
         return
 
     try:
@@ -607,11 +607,11 @@ def main(argv: list[str] | None = None) -> int:
     add_source(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
-    login_parser = sub.add_parser("login", help="authorise the Granola MCP")
+    login_parser = sub.add_parser("login", help="authorize the Granola MCP")
     login_parser.add_argument(
         "--no-browser",
         action="store_true",
-        help="print the authorisation URL instead of opening a browser",
+        help="print the authorization URL instead of opening a browser",
     )
     login_parser.set_defaults(func=cmd_login)
 

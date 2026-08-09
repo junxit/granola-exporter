@@ -140,7 +140,7 @@ class Archive:
     """Reads and writes the on-disk meeting archive."""
 
     def __init__(self, root: Path) -> None:
-        """Initialise the archive.
+        """Initialize the archive.
 
         Args:
             root: Directory the archive lives in; created on first write.

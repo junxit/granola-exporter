@@ -74,7 +74,7 @@ def test_auto_falls_back_to_mcp_without_a_key():
 
 @pytest.mark.parametrize("requested", ["public-api", "mcp"])
 def test_explicit_source_overrides_auto(requested):
-    """An explicit choice is honoured even when a key is present."""
+    """An explicit choice is honored even when a key is present."""
     assert _effective_source(_cfg(api_key="grn_x", source=requested)) == requested
 
 
@@ -136,11 +136,11 @@ def test_sync_via_mcp_without_credentials_never_opens_a_browser(capsys):
     assert "granola-export login" in str(exc.value)
 
 
-def test_doctor_reports_unauthorised_mcp_without_network(capsys):
+def test_doctor_reports_unauthorized_mcp_without_network(capsys):
     """`doctor` is a diagnostic: it neither prompts nor mutates credentials."""
     assert main(["doctor", "--source", "mcp"]) == 1
     out = capsys.readouterr().out
-    assert "NOT AUTHORISED" in out
+    assert "NOT AUTHORIZED" in out
     assert "sync source : mcp" in out
 
 
@@ -149,7 +149,7 @@ def test_login_does_not_gate_on_a_tty(monkeypatch):
 
     The flow never reads stdin -- it opens a browser and waits on a loopback
     socket -- so a piped or captured stdin says nothing about whether
-    authorisation can succeed. Gating on it broke login under any wrapper that
+    authorization can succeed. Gating on it broke login under any wrapper that
     runs commands non-interactively.
     """
     called: list[bool] = []
@@ -205,7 +205,7 @@ class _FakeMCPClient:
         return type(self).listing
 
 
-def _authorise(tmp_path, monkeypatch):
+def _authorize(tmp_path, monkeypatch):
     """Seed a credential file so verify does not skip the MCP check.
 
     Args:
@@ -222,7 +222,7 @@ def test_verify_deep_defaults_to_off(capsys, tmp_path, monkeypatch):
     """The cheap check is the default; --deep must be opted into."""
     import granola_exporter.mcp_api as api
 
-    _authorise(tmp_path, monkeypatch)
+    _authorize(tmp_path, monkeypatch)
     _FakeMCPClient.folders = [{"title": "Projects", "note_count": 3}]
     monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
 
@@ -237,7 +237,7 @@ def test_verify_flags_a_folder_count_mismatch(capsys, tmp_path, monkeypatch):
     """A folder Granola counts but we cannot retrieve is worth surfacing."""
     import granola_exporter.mcp_api as api
 
-    _authorise(tmp_path, monkeypatch)
+    _authorize(tmp_path, monkeypatch)
     _FakeMCPClient.folders = [
         {"title": "Career", "note_count": 56},
         {"title": "Church", "note_count": 0},
@@ -253,14 +253,14 @@ def test_verify_flags_a_folder_count_mismatch(capsys, tmp_path, monkeypatch):
 def test_verify_without_mcp_credentials_skips_cleanly(capsys):
     """Regression: this raised AttributeError on an unregistered --deep flag."""
     assert main(["verify", "--source", "mcp"]) == 0
-    assert "not authorised" in capsys.readouterr().out
+    assert "not authorized" in capsys.readouterr().out
 
 
 def test_verify_deep_reports_no_gap_on_an_empty_archive(capsys, tmp_path, monkeypatch):
     """An MCP that reports nothing leaves nothing un-archived."""
     import granola_exporter.mcp_api as api
 
-    _authorise(tmp_path, monkeypatch)
+    _authorize(tmp_path, monkeypatch)
     _FakeMCPClient.folders = []
     _FakeMCPClient.listing = (
         "preamble\n\n"

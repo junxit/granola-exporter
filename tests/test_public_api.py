@@ -69,7 +69,7 @@ def test_iter_notes_aborts_on_repeated_cursor(stub_payload):
 
 
 def test_retries_on_429_then_succeeds(stub_payload, monkeypatch):
-    """A 429 is retried, honouring Retry-After, rather than failing the sync."""
+    """A 429 is retried, honoring Retry-After, rather than failing the sync."""
     monkeypatch.setattr("granola_exporter.public_api.time.sleep", lambda _: None)
     calls = {"n": 0}
 

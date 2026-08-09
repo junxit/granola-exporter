@@ -96,7 +96,7 @@ def stub_payload(note_payload: dict) -> dict:
 # -- Granola MCP fixtures --------------------------------------------------
 #
 # Shaped exactly like the live MCP responses, including the prompt-injection
-# preamble, the localised date format and the XML escaping. The content is
+# preamble, the localized date format and the XML escaping. The content is
 # fictional: real responses carry private meeting data.
 
 MCP_PREAMBLE = (

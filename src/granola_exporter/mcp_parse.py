@@ -8,7 +8,7 @@ to stay stable.
 Three principles follow, and they are why this module is the way it is:
 
 1. **Never guess.** A field is confidently extracted, or it is absent.
-2. **Drift is loud.** An unrecognised shape raises. Returning "zero meetings"
+2. **Drift is loud.** An unrecognized shape raises. Returning "zero meetings"
    for an unparseable listing is indistinguishable from a genuinely empty
    window, and would let a sync report success while archiving nothing.
 3. **Verbatim survives.** The original text is archived alongside the parse, so
@@ -92,7 +92,7 @@ class MCPResponseFormatError(RuntimeError):
     """Raised when an MCP tool response does not match the expected shape."""
 
     def __init__(self, message: str, *, tool: str = "", excerpt: str = "") -> None:
-        """Initialise the error.
+        """Initialize the error.
 
         Args:
             message: What did not match.
@@ -142,7 +142,7 @@ class MCPTranscript:
 
 @dataclass(slots=True)
 class ParsedMCPDate:
-    """A localised MCP date resolved, where possible, to a UTC instant."""
+    """A localized MCP date resolved, where possible, to a UTC instant."""
 
     instant: datetime | None
     text: str
@@ -290,7 +290,7 @@ def _bool_attr(value: str | None) -> bool | None:
         value: The raw attribute value, or ``None`` when absent.
 
     Returns:
-        The boolean, or ``None`` when absent or unrecognised.
+        The boolean, or ``None`` when absent or unrecognized.
     """
     if value is None:
         return None
@@ -470,10 +470,10 @@ def listing_hash(element_text: str) -> str:
         element_text: The verbatim meeting element.
 
     Returns:
-        A hex SHA-256 digest over the whitespace-normalised element.
+        A hex SHA-256 digest over the whitespace-normalized element.
     """
-    normalised = _WS_RE.sub(" ", element_text).strip()
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+    normalized = _WS_RE.sub(" ", element_text).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 SPEAKER_LABEL_MAX_LEN = 40
@@ -506,7 +506,7 @@ def _accepted_labels(text: str) -> set[str]:
         text: The flat transcript string.
 
     Returns:
-        The labels considered real speakers, whitespace-normalised.
+        The labels considered real speakers, whitespace-normalized.
     """
     counts: dict[str, int] = {}
     for match in _CANDIDATE_RE.finditer(text):
@@ -594,7 +594,7 @@ def split_transcript(text: str) -> list[Utterance]:
 
 
 def parse_mcp_date(text: str) -> ParsedMCPDate:
-    """Resolve a localised MCP date string to a UTC instant.
+    """Resolve a localized MCP date string to a UTC instant.
 
     ``strptime`` cannot reliably consume ``%Z`` for arbitrary abbreviations, so
     the naive portion is parsed on its own and the trailing abbreviation is

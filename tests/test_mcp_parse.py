@@ -194,7 +194,7 @@ def test_multi_word_speaker_beats_its_own_suffix():
     assert labels == ["Oat Benson", "Milk Jones", "Oat Benson", "Milk Jones"]
 
 
-def test_unlabelled_transcript_keeps_its_content():
+def test_unlabeled_transcript_keeps_its_content():
     """Content is never dropped just because it cannot be attributed."""
     utterances = split_transcript("just some words with no labels at all")
     assert len(utterances) == 1
@@ -217,7 +217,7 @@ def test_transcript_with_a_non_uuid_id_raises():
 # -- dates -----------------------------------------------------------------
 
 
-def test_localised_date_resolves_to_utc():
+def test_localized_date_resolves_to_utc():
     """The measured discrepancy: 8pm CDT Jul 28 is Jul 29 in UTC."""
     parsed = parse_mcp_date("Jul 28, 2026 8:00 PM CDT")
     assert parsed.tz_resolved
@@ -240,7 +240,7 @@ def test_unknown_timezone_is_left_unresolved():
     "value", ["", "not a date", "2026-07-28T20:00:00Z", "Jul 99, 2026 8:00 PM CDT"]
 )
 def test_unparseable_dates_are_left_unresolved(value):
-    """Anything unrecognised yields no instant rather than an exception."""
+    """Anything unrecognized yields no instant rather than an exception."""
     assert parse_mcp_date(value).instant is None
 
 

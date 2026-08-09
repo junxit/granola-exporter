@@ -153,7 +153,7 @@ def render_note(note: Note, has_transcript_file: bool) -> str:
     parts = [frontmatter, "", f"# {note.display_title}", ""]
 
     if note.date_text:
-        # The MCP reports a localised, minute-rounded time. Reformatting that
+        # The MCP reports a localized, minute-rounded time. Reformatting that
         # into another timezone would be actively misleading, so it is printed
         # exactly as the source gave it.
         parts += [f"*{note.date_text}*", ""]

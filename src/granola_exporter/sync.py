@@ -189,7 +189,7 @@ def sync_public_api(
                 continue
             if not is_valid_note_id(note_id):
                 # Ids build filesystem paths and request URLs, so a malformed
-                # one is refused rather than sanitised.
+                # one is refused rather than sanitized.
                 counts.skipped += 1
                 print(
                     f"  SKIP  malformed note id from API: {note_id!r}",

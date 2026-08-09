@@ -5,7 +5,7 @@ Changelog
 -----
 - Fix: MCP rate limiting arrives as a tool error (HTTP 200 with isError set),
   not a 429, so nothing retried and a live backfill archived 66 notes with zero
-  transcripts. The client now recognises it and backs off 5/15/30/60s. Measured
+  transcripts. The client now recognizes it and backs off 5/15/30/60s. Measured
   live: get_meeting_transcript is still rejected at 20s spacing, far below the
   ~100 req/min the docs quote, so a first backfill needs several passes.
 - Fix: get_meeting_transcript prefixes its JSON with the prompt-injection
@@ -39,7 +39,7 @@ Changelog
   give up".
 - MCP responses are model-facing prose, not a versioned contract, so the parser
   fails loudly on drift: the envelope's own `count` attribute is reconciled
-  against the elements parsed, and an unrecognised shape raises rather than
+  against the elements parsed, and an unrecognized shape raises rather than
   returning an empty window. Parsed without an XML parser, so entity expansion
   and XXE are out of the threat model by construction.
 - Windows returning 50+ results are bisected and rescanned, since the MCP has no
@@ -65,7 +65,7 @@ Changelog
   archive: "sync --full" went from 92 detail fetches to 0 (1.4s).
 - Refactor: extracted secure_io.py (0600/0700 primitives), ratelimit.py
   (RateLimiter) and sync.py (sync_public_api) so the sync loop takes an
-  injected client. Groundwork for a second backend; no behaviour change.
+  injected client. Groundwork for a second backend; no behavior change.
 - Added tests/test_sync.py — the sync loop had no coverage while it lived
   inside cli.cmd_sync.
 - Security: validate note ids against NOTE_ID_RE before using them to build

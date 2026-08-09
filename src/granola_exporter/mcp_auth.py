@@ -35,13 +35,13 @@ DEFAULT_CALLBACK_TIMEOUT = 300.0
 _SUCCESS_BODY = (
     b"<!doctype html><meta charset=utf-8><title>granola-exporter</title>"
     b"<body style='font-family:system-ui;padding:3rem'>"
-    b"<h1>Authorised</h1><p>You can close this tab and return to the terminal."
+    b"<h1>Authorized</h1><p>You can close this tab and return to the terminal."
     b"</p></body>"
 )
 _FAILURE_BODY = (
     b"<!doctype html><meta charset=utf-8><title>granola-exporter</title>"
     b"<body style='font-family:system-ui;padding:3rem'>"
-    b"<h1>Authorisation failed</h1><p>Check the terminal for details.</p></body>"
+    b"<h1>Authorization failed</h1><p>Check the terminal for details.</p></body>"
 )
 
 
@@ -52,7 +52,7 @@ class MCPAuthError(RuntimeError):
 def token_store_path() -> Path:
     """Resolve where the OAuth token cache lives.
 
-    Honours ``GRANOLA_MCP_TOKEN_FILE`` then ``XDG_STATE_HOME``, defaulting to
+    Honors ``GRANOLA_MCP_TOKEN_FILE`` then ``XDG_STATE_HOME``, defaulting to
     ``~/.local/state/granola-exporter/mcp-oauth.json``. Deliberately outside
     the archive directory: the archive is something a user may back up or sync
     to another machine, and credentials must not travel with it.
@@ -98,7 +98,7 @@ class AuthStatus:
             A human-readable description of the credential state.
         """
         if not self.present:
-            return "NOT AUTHORISED — run 'granola-export login'"
+            return "NOT AUTHORIZED — run 'granola-export login'"
         if self.expires_at is None:
             bit = "no expiry recorded"
         elif self.expired:
@@ -107,7 +107,7 @@ class AuthStatus:
             minutes = int((self.expires_at - datetime.now(UTC)).total_seconds() // 60)
             bit = f"access token expires in {minutes}m"
         refresh = "refresh available" if self.has_refresh_token else "no refresh token"
-        return f"authorised ({bit}, {refresh})"
+        return f"authorized ({bit}, {refresh})"
 
 
 class FileTokenStorage:
@@ -119,7 +119,7 @@ class FileTokenStorage:
     """
 
     def __init__(self, path: Path, server_url: str) -> None:
-        """Initialise the store.
+        """Initialize the store.
 
         Args:
             path: Where the credentials live.
@@ -218,7 +218,7 @@ class FileTokenStorage:
     # -- synchronous helpers for doctor / login ---------------------------
 
     def status(self) -> AuthStatus:
-        """Summarise the stored credentials without any network access.
+        """Summarize the stored credentials without any network access.
 
         Returns:
             The credential state.
@@ -331,7 +331,7 @@ class _CallbackServer(HTTPServer):
     """An ``HTTPServer`` carrying the captured redirect parameters."""
 
     def __init__(self, address: tuple[str, int], path: str) -> None:
-        """Initialise the server.
+        """Initialize the server.
 
         Args:
             address: The bind address.
@@ -353,7 +353,7 @@ class LoopbackCallbackServer:
     """
 
     def __init__(self, port: int = 0, path: str = DEFAULT_CALLBACK_PATH) -> None:
-        """Initialise the server.
+        """Initialize the server.
 
         Args:
             port: The port to bind; ``0`` picks an ephemeral one.
@@ -416,7 +416,7 @@ class LoopbackCallbackServer:
                 f"timed out after {timeout:.0f}s waiting for the OAuth redirect"
             )
         if self._server.error:
-            raise MCPAuthError(f"authorisation was refused: {self._server.error}")
+            raise MCPAuthError(f"authorization was refused: {self._server.error}")
         if not self._server.code:
             raise MCPAuthError("the OAuth redirect carried no authorization code")
         return self._server.code, self._server.state

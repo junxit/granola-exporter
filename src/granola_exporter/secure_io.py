@@ -72,7 +72,7 @@ def write_json(path: Path, payload: Any) -> None:
 
     Args:
         path: Destination file.
-        payload: JSON-serialisable value.
+        payload: JSON-serializable value.
     """
     secure_mkdir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")

@@ -45,7 +45,7 @@ class _Recorder(MCPClient):
     """A client whose transport is replaced by a call log."""
 
     def __init__(self, result: t.CallToolResult | None = None) -> None:
-        """Initialise without connecting.
+        """Initialize without connecting.
 
         Args:
             result: The result every ``_call`` returns.
@@ -182,7 +182,7 @@ def test_malformed_ids_never_reach_a_request(bad):
 def test_uppercase_uuids_are_accepted_on_the_wire():
     """UUIDs are case-insensitive; rejecting one would drop a real meeting.
 
-    Case is normalised where it matters -- when the id becomes an archive key
+    Case is normalized where it matters -- when the id becomes an archive key
     -- not here, so a server that changes casing cannot cost us a note.
     """
     from granola_exporter.models import mcp_archive_key
@@ -267,7 +267,7 @@ def test_expected_tool_set_matches_the_documented_surface():
 # -- rate limiting ---------------------------------------------------------
 
 
-def test_rate_limit_is_recognised_from_the_message():
+def test_rate_limit_is_recognized_from_the_message():
     """The server answers 200 with is_error set, not a 429."""
     from granola_exporter.mcp_api import _is_rate_limited
 

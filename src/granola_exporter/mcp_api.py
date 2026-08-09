@@ -1,7 +1,7 @@
 """Synchronous client for the Granola MCP server.
 
 The MCP SDK is async-only; the rest of this tool is synchronous. Rather than
-colour the whole codebase async for one backend, the async boundary stops here:
+color the whole codebase async for one backend, the async boundary stops here:
 a single worker thread owns one event loop, one transport and one session for
 the client's lifetime, and tool calls are marshalled onto it.
 
@@ -61,7 +61,7 @@ MAX_RETRIES = 5
 RATE_LIMIT_BACKOFF = (5.0, 15.0, 30.0, 60.0)
 
 # Rate limiting arrives as a *tool error* -- HTTP 200 with isError set -- rather
-# than a 429, so it has to be recognised from the message.
+# than a 429, so it has to be recognized from the message.
 _RATE_LIMIT_MARKERS = ("rate limit", "too many requests", "slow down")
 
 EXPECTED_TOOLS = frozenset(
@@ -260,7 +260,7 @@ class MCPClient:
         allow_login: bool = False,
         open_browser: bool = True,
     ) -> None:
-        """Initialise the client. No connection is made until entered.
+        """Initialize the client. No connection is made until entered.
 
         Args:
             server_url: The MCP endpoint.
@@ -303,7 +303,7 @@ class MCPClient:
         self.close()
 
     def connect(self) -> None:
-        """Start the worker thread and wait for the session to initialise.
+        """Start the worker thread and wait for the session to initialize.
 
         Raises:
             MCPAuthError: If credentials are absent or expired and interactive
@@ -315,7 +315,7 @@ class MCPClient:
 
         if not self.allow_login and not self.storage.status().present:
             raise MCPAuthError(
-                "not authorised for the Granola MCP — run 'granola-export login'"
+                "not authorized for the Granola MCP — run 'granola-export login'"
             )
 
         if self.allow_login:
@@ -438,13 +438,13 @@ class MCPClient:
         """
         if not self.allow_login:
             raise MCPAuthError(
-                "the Granola MCP needs re-authorisation — "
+                "the Granola MCP needs re-authorization — "
                 "run 'granola-export login'"
             )
         # flush=True throughout: this runs on the worker thread and stdout may
         # be a pipe, so without it the URL can sit in a buffer while the user
         # stares at a silent terminal waiting for something to click.
-        print("\nAuthorise granola-exporter in your browser:", flush=True)
+        print("\nAuthorize granola-exporter in your browser:", flush=True)
         print(f"  {url}\n", flush=True)
 
         opened = webbrowser.open(url) if self.open_browser else False
@@ -564,7 +564,7 @@ class MCPClient:
         """Fetch the user's meeting folders.
 
         Returns:
-            The folder list; empty when the shape is unrecognised.
+            The folder list; empty when the shape is unrecognized.
         """
         payload = _result_json(
             self._call("list_meeting_folders"), tool="list_meeting_folders"
