@@ -17,6 +17,7 @@ from granola_exporter.render import render_note, render_transcript
 from granola_exporter.store import Archive
 from granola_exporter.sync import (
     SUSPICIOUS_RESULT_COUNT,
+    TRANSCRIPT_GIVEUP_STREAK,
     SyncOptions,
     sync_mcp,
     sync_public_api,
@@ -489,3 +490,85 @@ def test_transcript_failure_is_counted_and_warned(tmp_path, capsys):
     assert counts.transcripts_failed == 1
     assert "no transcript" in capsys.readouterr().err
     assert any("WITHOUT a transcript" in w for w in counts.warnings())
+
+
+def _meetings(count: int) -> list[tuple[str, str, date]]:
+    """Build a run of fake meetings inside the scan window.
+
+    Args:
+        count: How many to build.
+
+    Returns:
+        ``(uuid, title, date)`` tuples for :class:`FakeMCP`.
+    """
+    return [(_uuid(i), f"Yoghurt sync {i}", date(2026, 8, 1)) for i in range(1, count + 1)]
+
+
+def test_transcripts_give_up_after_a_streak_of_throttling(tmp_path, capsys):
+    """A throttled pass stops asking instead of sleeping through every note.
+
+    Each exhausted retry ladder costs about two minutes. Without the latch a
+    backfill against a spent quota spends hours proving the same point.
+    """
+
+    class Throttled(FakeMCP):
+        def get_meeting_transcript(self, meeting_id):
+            """Reject every transcript the way a throttled server does."""
+            self.calls.append(("get_meeting_transcript", (meeting_id,)))
+            raise RuntimeError("Rate limit exceeded. Please slow down.")
+
+    fake = Throttled(_meetings(6))
+    counts = sync_mcp(
+        Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 1)), today=TODAY
+    )
+
+    assert counts.new == 6, "notes are still archived, just without transcripts"
+    assert fake.count("get_meeting_transcript") == TRANSCRIPT_GIVEUP_STREAK
+    assert counts.transcripts_failed == TRANSCRIPT_GIVEUP_STREAK
+    assert counts.transcripts_deferred == 6 - TRANSCRIPT_GIVEUP_STREAK
+    assert "STOP" in capsys.readouterr().err
+    assert any("gave up early" in w for w in counts.warnings())
+
+
+def test_a_non_throttling_failure_does_not_trip_the_latch(tmp_path):
+    """One missing transcript says nothing about the next note."""
+
+    class Broken(FakeMCP):
+        def get_meeting_transcript(self, meeting_id):
+            """Fail for a reason that is not the server throttling."""
+            self.calls.append(("get_meeting_transcript", (meeting_id,)))
+            raise RuntimeError("transcript unavailable for this meeting")
+
+    fake = Broken(_meetings(6))
+    counts = sync_mcp(
+        Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 1)), today=TODAY
+    )
+
+    assert fake.count("get_meeting_transcript") == 6, "every note must be tried"
+    assert counts.transcripts_deferred == 0
+
+
+def test_giving_up_leaves_the_notes_retryable(tmp_path):
+    """The latch is only safe because the next run picks the notes back up."""
+
+    class Throttled(FakeMCP):
+        throttle = True
+
+        def get_meeting_transcript(self, meeting_id):
+            """Throttle until the flag is cleared, then serve normally."""
+            if self.throttle:
+                self.calls.append(("get_meeting_transcript", (meeting_id,)))
+                raise RuntimeError("Rate limit exceeded")
+            return super().get_meeting_transcript(meeting_id)
+
+    fake = Throttled(_meetings(6))
+    opts = SyncOptions(since=date(2026, 7, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    fake.throttle = False
+    fake.calls.clear()
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meeting_transcript") == 6, "all six are retried"
+    assert counts.transcripts_failed == 0
+    assert counts.transcripts_deferred == 0

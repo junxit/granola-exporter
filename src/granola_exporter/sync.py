@@ -64,6 +64,14 @@ ROLLING_REFRESH_DEFAULT = 30
 # Backfill walks backwards until this many consecutive windows come back empty.
 EMPTY_WINDOWS_BEFORE_STOP = 2
 
+# Transcripts are the most aggressively limited tool on the MCP, and each
+# exhausted retry ladder costs about two minutes of sleeping. Once this many
+# notes in a row have been throttled, the quota is spent and the rest of the
+# pass would only sleep through the same wall, so the run stops asking. This is
+# safe precisely because it is resumable: a note archived without a transcript
+# is retried by the next `sync`, and an archived transcript is never refetched.
+TRANSCRIPT_GIVEUP_STREAK = 3
+
 
 @dataclass(slots=True)
 class SyncOptions:
@@ -90,6 +98,7 @@ class SyncCounts:
     list_calls: int = 0
     undated: int = 0
     transcripts_failed: int = 0
+    transcripts_deferred: int = 0
     truncated_windows: int = 0
 
     def record(self, status: str) -> None:
@@ -123,6 +132,13 @@ class SyncCounts:
             notes.append(
                 f"{self.transcripts_failed} note(s) archived WITHOUT a transcript "
                 "— re-run sync to retry them"
+            )
+        if self.transcripts_deferred:
+            notes.append(
+                f"transcripts gave up early: {self.transcripts_deferred} further "
+                "note(s) archived without one, unattempted — the server was "
+                "throttling every request. Re-run sync to continue where this "
+                "pass stopped"
             )
         if self.undated:
             notes.append(
@@ -565,6 +581,26 @@ def sync_mcp(
     return counts
 
 
+def _is_throttling(exc: BaseException) -> bool:
+    """Check whether a failed transcript fetch was the server throttling us.
+
+    Args:
+        exc: The exception raised by the fetch.
+
+    Returns:
+        ``True`` when the fetch failed because every retry stayed rate limited.
+        Falls back to matching the message, so a backend that raises its own
+        error type -- a test fake, or a future non-SDK client -- still trips the
+        latch instead of grinding through the whole pass.
+    """
+    from .mcp_api import MCPRateLimitError
+
+    if isinstance(exc, MCPRateLimitError):
+        return True
+    text = str(exc).lower()
+    return "rate limit" in text or "too many requests" in text
+
+
 def _within(meeting: MCPMeeting, trailing_start: date) -> bool:
     """Check whether a meeting falls inside the trailing rescan window.
 
@@ -661,6 +697,10 @@ def _write_mcp_meetings(
     index = archive.load_index()
     listings = {m.meeting_id: m for m in pending}
 
+    # Consecutive transcript fetches lost to throttling, and the latch it trips.
+    throttled = 0
+    giving_up = False
+
     for batch in _chunk(pending, MAX_MEETINGS_PER_CALL):
         try:
             text = client.get_meetings([m.meeting_id for m in batch])
@@ -694,12 +734,18 @@ def _write_mcp_meetings(
                 if entry.get("has_transcript") and transcript_at
                 else None
             )
-            if transcript is None:
+            if transcript is None and giving_up:
+                # The quota is spent. Archive the note now rather than sleeping
+                # through a retry ladder that cannot succeed; the next run
+                # picks up exactly these notes.
+                counts.transcripts_deferred += 1
+            elif transcript is None:
                 try:
                     payload = client.get_meeting_transcript(detail.meeting_id)
                     transcript = parse_transcript(payload)
                     counts.transcript_fetches += 1
                     transcript_at = _now_iso()
+                    throttled = 0
                 except MCPResponseFormatError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -712,6 +758,17 @@ def _write_mcp_meetings(
                         f"  WARN  no transcript for {key} — {exc}",
                         file=sys.stderr,
                     )
+                    # Only throttling says anything about the *next* note; one
+                    # unparseable or missing transcript says nothing at all.
+                    throttled = throttled + 1 if _is_throttling(exc) else 0
+                    if throttled >= TRANSCRIPT_GIVEUP_STREAK:
+                        giving_up = True
+                        print(
+                            f"  STOP  {throttled} transcripts throttled in a row "
+                            "— skipping the rest this pass; re-run sync to "
+                            "retry them",
+                            file=sys.stderr,
+                        )
 
             names = folders.get(detail.meeting_id) or set(previous.get("folders") or [])
             raw = build_raw(

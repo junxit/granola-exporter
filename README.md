@@ -269,12 +269,21 @@ API key, use it — this backend exists for accounts that cannot get one.
   serve raw transcripts at all.
 - **Transcripts are aggressively rate limited.** Measured live: `get_meeting_transcript`
   was still rejected at 20-second spacing, far below the ~100 req/min the docs
-  quote for the tools overall. The client backs off (5s → 15s → 30s → 60s) and
-  retries, but a large backfill will not fetch every transcript in one pass.
-  Notes are archived **without** a transcript rather than being skipped, the
-  count is reported as a warning, and **re-running `sync` retries exactly those
-  notes** — an archived transcript is never refetched, so re-runs are cheap and
-  converge. Budget several passes for a first MCP backfill.
+  quote for the tools overall — the docs also say the budget varies per plan and
+  per tool, so transcripts get their **own** request budget, separate from the
+  listing and detail calls that run fine at 1/s. On a rejection the client backs
+  off (5s → 15s → 30s → 60s) **and** permanently halves that tool's rate for the
+  rest of the run, down to a floor of one request per minute, so the working
+  pace is learned once rather than rediscovered on every note.
+
+  A large backfill still will not fetch every transcript in one pass. Notes are
+  archived **without** a transcript rather than being skipped, the count is
+  reported as a warning, and **re-running `sync` retries exactly those notes** —
+  an archived transcript is never refetched, so re-runs are cheap and converge.
+  Once three notes in a row have been throttled the pass stops requesting
+  transcripts altogether and says so, rather than spending ~2 minutes per note
+  sleeping against a spent quota; the remaining notes are archived immediately
+  and picked up by the next run. Budget several passes for a first MCP backfill.
 
 ### How the two backends join up
 

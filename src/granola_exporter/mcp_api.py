@@ -53,7 +53,25 @@ MAX_MEETINGS_PER_CALL = 10
 MCP_BURST = 5
 MCP_RATE = 1.0
 
+# The docs also say the budget varies "depending on your Granola subscription
+# plan and the MCP tool that you're using", and measurement agrees: transcript
+# fetches were rejected at 20s spacing while listing calls ran fine at 1/s. A
+# single shared bucket cannot express that -- it either paces everything at
+# transcript speed or keeps hammering transcripts -- so each tool named here
+# gets its own budget and its own penalty, and everything else shares the
+# default one.
+TOOL_BUDGETS = {
+    "get_meeting_transcript": (2, 0.5),
+}
+
 MAX_RETRIES = 5
+
+# Transport failures are retried too, on a separate and much smaller budget: a
+# call that times out has already burned `timeout + 30` seconds, so five of
+# them would stall a run for minutes. Rate limiting is a queue; a dead socket
+# is not.
+MAX_TRANSPORT_RETRIES = 3
+TRANSPORT_BACKOFF = 2.0
 
 # Backoff for rate limiting. Measured against the live server: transcript
 # fetches were still rejected at 20s spacing, so the quota window is well
@@ -61,8 +79,35 @@ MAX_RETRIES = 5
 RATE_LIMIT_BACKOFF = (5.0, 15.0, 30.0, 60.0)
 
 # Rate limiting arrives as a *tool error* -- HTTP 200 with isError set -- rather
-# than a 429, so it has to be recognized from the message.
-_RATE_LIMIT_MARKERS = ("rate limit", "too many requests", "slow down")
+# than a 429, so it has to be recognized from the message. These responses are
+# prose written for a language model and can be reworded without notice, so the
+# list is deliberately wider than the three phrasings seen live: a missed
+# marker turns a retryable pause into a hard failure.
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "too many requests",
+    "slow down",
+    "quota exceeded",
+    "quota exhausted",
+    "try again later",
+    "retry after",
+    "429",
+)
+
+# ...but a false positive costs the full backoff ladder in sleeps and still
+# cannot succeed, so anything that is definitively *not* a pause wins. Kept
+# narrow on purpose: plan and quota wording is excluded, because a plan-derived
+# rate limit is still a rate limit.
+_NOT_RETRYABLE_MARKERS = (
+    "not found",
+    "does not exist",
+    "unauthorized",
+    "not authorized",
+    "forbidden",
+    "invalid",
+)
 
 EXPECTED_TOOLS = frozenset(
     {
@@ -87,6 +132,15 @@ class MCPError(RuntimeError):
 
 class MCPToolError(MCPError):
     """Raised when a tool reports an error or returns nothing usable."""
+
+
+class MCPRateLimitError(MCPToolError):
+    """Raised when a tool stayed rate limited across every retry.
+
+    Distinct from its parent so callers can tell "the server is throttling us"
+    from "this one call failed": the first says something about the rest of the
+    run, and :mod:`granola_exporter.sync` uses it to stop asking.
+    """
 
 
 class MCPProtocol(Protocol):
@@ -132,7 +186,10 @@ def _is_rate_limited(result: Any) -> bool:
     """Check whether a tool result is a rate-limit rejection.
 
     The server answers 200 with ``is_error`` set and a message rather than a
-    429, so there is no status code or ``Retry-After`` to key off.
+    429, so there is no status code or ``Retry-After`` to key off. Matching is
+    on prose that carries no compatibility promise, so a definitively
+    non-retryable phrase overrides a rate-limit one: sleeping through four
+    backoffs for a meeting that does not exist helps nobody.
 
     Args:
         result: Whatever ``call_tool`` returned.
@@ -149,6 +206,8 @@ def _is_rate_limited(result: Any) -> bool:
     text = " ".join(
         b.text for b in blocks if getattr(b, "text", None) is not None
     ).lower()
+    if any(marker in text for marker in _NOT_RETRYABLE_MARKERS):
+        return False
     return any(marker in text for marker in _RATE_LIMIT_MARKERS)
 
 
@@ -278,6 +337,9 @@ class MCPClient:
         self.open_browser = open_browser
         self.storage = FileTokenStorage(token_path or token_store_path(), server_url)
         self._limiter = RateLimiter(MCP_BURST, MCP_RATE)
+        self._tool_limiters: dict[str, RateLimiter] = {
+            tool: RateLimiter(burst, rate) for tool, (burst, rate) in TOOL_BUDGETS.items()
+        }
 
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -483,13 +545,32 @@ class MCPClient:
 
     # -- calling tools -----------------------------------------------------
 
+    def limiter_for(self, tool: str) -> RateLimiter:
+        """Return the bucket pacing one tool.
+
+        Args:
+            tool: The tool name.
+
+        Returns:
+            The tool's own limiter when it has a separate budget, otherwise the
+            shared default. Per-tool buckets keep a penalty where it belongs: a
+            throttled transcript must not slow the listing calls down with it.
+        """
+        return self._tool_limiters.get(tool, self._limiter)
+
     def _call(self, tool: str, arguments: dict[str, Any] | None = None) -> Any:
         """Invoke a tool on the session and block for its result.
 
         Retries when the server reports rate limiting. That arrives as a tool
         error rather than an HTTP 429, so without this a long backfill quietly
         loses whatever it was fetching -- which is exactly how the first live
-        run dropped every transcript.
+        run dropped every transcript. Each rejection also permanently halves
+        that tool's rate for the rest of the run, so the working pace is
+        learned once instead of being rediscovered call by call.
+
+        Transport failures are retried too, on their own smaller budget. One
+        blip otherwise kills a whole ten-meeting batch, which is not a
+        distinction the public API client makes either.
 
         Args:
             tool: The tool name.
@@ -500,12 +581,17 @@ class MCPClient:
 
         Raises:
             MCPError: If the client is not connected, or the call fails.
+            MCPRateLimitError: If every attempt came back rate limited.
         """
         if self._session is None or self._loop is None:
             raise MCPError("MCP client is not connected")
 
-        for attempt in range(MAX_RETRIES):
-            self._limiter.acquire()
+        limiter = self.limiter_for(tool)
+        limited = 0
+        transport = 0
+
+        while True:
+            limiter.acquire()
             future = asyncio.run_coroutine_threadsafe(
                 self._session.call_tool(tool, arguments or {}), self._loop
             )
@@ -513,25 +599,58 @@ class MCPClient:
                 result = future.result(timeout=self.timeout + 30.0)
             except concurrent.futures.TimeoutError as exc:
                 future.cancel()
-                raise MCPError(f"{tool} timed out after {self.timeout:.0f}s") from exc
+                transport += 1
+                if transport >= MAX_TRANSPORT_RETRIES:
+                    raise MCPError(
+                        f"{tool} timed out after {self.timeout:.0f}s"
+                    ) from exc
+                self._warn_retry(tool, "timed out", TRANSPORT_BACKOFF * transport)
+                time.sleep(TRANSPORT_BACKOFF * transport)
+                continue
             except MCPError:
                 raise
             except Exception as exc:
-                raise MCPError(f"{tool} failed: {redact(str(exc))}") from exc
+                transport += 1
+                if transport >= MAX_TRANSPORT_RETRIES:
+                    raise MCPError(f"{tool} failed: {redact(str(exc))}") from exc
+                self._warn_retry(
+                    tool, redact(str(exc)), TRANSPORT_BACKOFF * transport
+                )
+                time.sleep(TRANSPORT_BACKOFF * transport)
+                continue
 
             if not _is_rate_limited(result):
                 return result
-            if attempt == MAX_RETRIES - 1:
-                break
-            delay = RATE_LIMIT_BACKOFF[min(attempt, len(RATE_LIMIT_BACKOFF) - 1)]
+
+            rate = limiter.penalize()
+            limited += 1
+            if limited >= MAX_RETRIES:
+                raise MCPRateLimitError(
+                    f"{tool} rate limited after {MAX_RETRIES} attempts"
+                )
+            delay = RATE_LIMIT_BACKOFF[min(limited - 1, len(RATE_LIMIT_BACKOFF) - 1)]
             print(
-                f"  rate limited on {tool}; retrying in {delay:.0f}s",
+                f"  rate limited on {tool}; retrying in {delay:.0f}s "
+                f"(pacing {tool} at {rate * 60.0:.1f}/min for the rest of this run)",
                 file=sys.stderr,
                 flush=True,
             )
             time.sleep(delay)
 
-        raise MCPToolError(f"{tool} rate limited after {MAX_RETRIES} attempts")
+    @staticmethod
+    def _warn_retry(tool: str, reason: str, delay: float) -> None:
+        """Narrate a transport retry.
+
+        Args:
+            tool: The tool being retried.
+            reason: Why the attempt failed.
+            delay: Seconds before the next attempt.
+        """
+        print(
+            f"  {tool} {reason}; retrying in {delay:.0f}s",
+            file=sys.stderr,
+            flush=True,
+        )
 
     # -- the six operations ------------------------------------------------
 

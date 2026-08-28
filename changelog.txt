@@ -1,6 +1,33 @@
 Changelog
 =========
 
+0.3.0
+-----
+- MCP retries are now per tool. The docs say the budget varies "depending on
+  your Granola subscription plan and the MCP tool that you're using", and
+  measurement agrees -- transcripts were rejected at 20s spacing while listing
+  calls ran fine at 1/s. get_meeting_transcript now has its own token bucket, so
+  throttling it no longer paces the listing and detail calls down with it.
+- Backoff is no longer relearned on every call. A rejection permanently halves
+  that tool's rate for the rest of the run, floored at one request per minute,
+  so the working pace is discovered once instead of per note.
+- A throttled pass now gives up on transcripts after three notes in a row are
+  rejected, instead of spending the full 110s retry ladder on each remaining
+  note against a spent quota. Those notes are archived immediately without a
+  transcript, counted separately, and warned about; the next run picks up
+  exactly where this one stopped. Safe because an archived transcript is never
+  refetched.
+- Transport failures on an MCP call are now retried too, on their own smaller
+  budget of three attempts with linear backoff. Previously one dropped socket or
+  timeout killed a whole ten-meeting batch, an asymmetry with the public API
+  client, which has always retried network errors.
+- Rate-limit detection widened beyond the three phrasings seen live -- MCP
+  errors are prose and can be reworded without notice, and a missed marker turns
+  a retryable pause into a hard failure. A narrow non-retryable list ("not
+  found", "unauthorized", "invalid", ...) now wins over a rate-limit match, so a
+  false positive cannot burn the whole backoff ladder on a call that could never
+  succeed.
+
 0.2.0
 -----
 - Fix: MCP rate limiting arrives as a tool error (HTTP 200 with isError set),

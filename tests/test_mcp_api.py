@@ -294,6 +294,7 @@ def test_call_retries_a_rate_limited_tool(monkeypatch):
             self._loop = object()
             self.timeout = 1.0
             self._limiter = api.RateLimiter(1000, 1e6)
+            self._tool_limiters = {}
 
     client = Flaky()
     results = [
@@ -337,6 +338,7 @@ def test_call_gives_up_after_max_retries(monkeypatch):
             self._loop = object()
             self.timeout = 1.0
             self._limiter = api.RateLimiter(1000, 1e6)
+            self._tool_limiters = {}
 
     def fake_run(coro, loop):
         coro.close()
@@ -350,3 +352,192 @@ def test_call_gives_up_after_max_retries(monkeypatch):
     monkeypatch.setattr(api.asyncio, "run_coroutine_threadsafe", fake_run)
     with pytest.raises(MCPToolError, match="rate limited after"):
         Always()._call("x")
+
+
+# -- per-tool budgets, penalties and transport retries ----------------------
+
+
+def _stub_client(monkeypatch, results):
+    """Build a connected-looking client whose transport replays ``results``.
+
+    Args:
+        monkeypatch: The pytest fixture.
+        results: Per-attempt results; an exception instance is raised instead
+            of returned.
+
+    Returns:
+        A tuple of the client and the list recording each attempt.
+    """
+    import granola_exporter.mcp_api as api
+
+    monkeypatch.setattr(api.time, "sleep", lambda _: None)
+    attempts: list[int] = []
+
+    class Stub(MCPClient):
+        def __init__(self):
+            self._session = type(
+                "S", (), {"call_tool": lambda self, n, a: _noop()}
+            )()
+            self._loop = object()
+            self.timeout = 1.0
+            self._limiter = api.RateLimiter(1000, 1e6)
+            self._tool_limiters = {
+                tool: api.RateLimiter(1000, 1e6) for tool in api.TOOL_BUDGETS
+            }
+
+    def fake_run(coro, loop):
+        attempts.append(1)
+        coro.close()
+        outcome = results[len(attempts) - 1]
+
+        class F:
+            def result(self, timeout=None):
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+            def cancel(self):
+                return True
+
+        return F()
+
+    monkeypatch.setattr(api.asyncio, "run_coroutine_threadsafe", fake_run)
+    return Stub(), attempts
+
+
+def test_transcripts_get_their_own_bucket():
+    """The docs say the budget varies per tool; one bucket cannot express that."""
+    from granola_exporter.mcp_api import MCP_BURST, MCP_RATE, TOOL_BUDGETS
+    from granola_exporter.ratelimit import RateLimiter
+
+    client = MCPClient.__new__(MCPClient)
+    client._limiter = RateLimiter(MCP_BURST, MCP_RATE)
+    client._tool_limiters = {
+        tool: RateLimiter(burst, rate) for tool, (burst, rate) in TOOL_BUDGETS.items()
+    }
+
+    transcripts = client.limiter_for("get_meeting_transcript")
+    listings = client.limiter_for("list_meetings")
+
+    assert transcripts is not listings
+    assert client.limiter_for("get_meetings") is listings, "the rest share one"
+
+
+def test_penalizing_one_tool_leaves_the_others_alone(monkeypatch):
+    """A throttled transcript must not slow the listing calls down with it."""
+    client, _ = _stub_client(monkeypatch, [_text_result("ok")])
+
+    transcripts = client.limiter_for("get_meeting_transcript")
+    listings = client.limiter_for("list_meetings")
+    before = listings.rate
+
+    transcripts.penalize()
+
+    assert transcripts.rate < 1e6
+    assert listings.rate == before
+
+
+def test_a_rejection_slows_that_tool_for_the_rest_of_the_run(monkeypatch):
+    """Otherwise every call rediscovers the limit from scratch."""
+    client, _ = _stub_client(
+        monkeypatch,
+        [
+            _text_result("Rate limit exceeded", is_error=True),
+            _text_result("Rate limit exceeded", is_error=True),
+            _text_result("done"),
+        ],
+    )
+    limiter = client.limiter_for("list_meetings")
+    start = limiter.rate
+
+    client._call("list_meetings")
+
+    assert limiter.rate == start / 4.0, "one halving per rejection, and it sticks"
+
+
+def test_penalty_stops_at_the_floor():
+    """A bucket that halves forever would stop issuing requests entirely."""
+    from granola_exporter.ratelimit import RateLimiter
+
+    limiter = RateLimiter(5, 1.0, min_rate=0.25)
+
+    for _ in range(20):
+        limiter.penalize()
+
+    assert limiter.rate == 0.25
+
+
+def test_a_transport_blip_is_retried(monkeypatch):
+    """One dropped socket must not kill a whole ten-meeting batch."""
+    client, attempts = _stub_client(
+        monkeypatch, [ConnectionError("connection reset"), _text_result("recovered")]
+    )
+
+    assert _result_text(client._call("get_meetings"), tool="get_meetings") == "recovered"
+    assert len(attempts) == 2
+
+
+def test_transport_retries_are_bounded(monkeypatch):
+    """A dead socket is not a queue; it gets a much smaller budget than a 429."""
+    import granola_exporter.mcp_api as api
+
+    client, attempts = _stub_client(
+        monkeypatch, [ConnectionError("connection reset")] * api.MAX_TRANSPORT_RETRIES
+    )
+
+    with pytest.raises(api.MCPError, match="failed"):
+        client._call("get_meetings")
+    assert len(attempts) == api.MAX_TRANSPORT_RETRIES
+
+
+def test_a_timeout_is_retried_then_surfaced(monkeypatch):
+    """Regression: a single timeout used to lose the whole batch outright."""
+    import concurrent.futures
+
+    import granola_exporter.mcp_api as api
+
+    client, attempts = _stub_client(
+        monkeypatch,
+        [concurrent.futures.TimeoutError()] * api.MAX_TRANSPORT_RETRIES,
+    )
+
+    with pytest.raises(api.MCPError, match="timed out"):
+        client._call("get_meeting_transcript")
+    assert len(attempts) == api.MAX_TRANSPORT_RETRIES
+
+
+def test_exhausted_rate_limiting_raises_a_distinct_error(monkeypatch):
+    """The sync layer needs to tell throttling apart from a one-off failure."""
+    import granola_exporter.mcp_api as api
+
+    client, _ = _stub_client(
+        monkeypatch, [_text_result("Rate limit exceeded", is_error=True)] * api.MAX_RETRIES
+    )
+
+    with pytest.raises(api.MCPRateLimitError):
+        client._call("get_meeting_transcript")
+
+
+def test_rewordings_are_still_recognized_as_rate_limiting():
+    """MCP responses are prose; a missed marker becomes a hard failure."""
+    from granola_exporter.mcp_api import _is_rate_limited
+
+    for text in (
+        "Quota exceeded for this workspace.",
+        "Too many requests — please try again later.",
+        "429: slow down",
+        "You are being rate-limited.",
+    ):
+        assert _is_rate_limited(_text_result(text, is_error=True)) is True, text
+
+
+def test_a_definitive_failure_is_never_retried_as_a_rate_limit():
+    """A false positive costs the whole backoff ladder and cannot succeed."""
+    from granola_exporter.mcp_api import _is_rate_limited
+
+    for text in (
+        "Meeting not found.",
+        "Invalid meeting id; rate limit parameters were ignored.",
+        "Unauthorized.",
+    ):
+        assert _is_rate_limited(_text_result(text, is_error=True)) is False, text
