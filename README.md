@@ -1,5 +1,7 @@
 # granola-exporter
 
+[![Release](https://img.shields.io/github/v/release/junxit/granola-exporter?label=release&color=blue)](https://github.com/junxit/granola-exporter/releases/latest)
+
 Keep a durable, local, incremental archive of your [Granola](https://granola.ai)
 meetings — notes, AI summaries, diarized transcripts, attendees and folders — as
 plain Markdown plus verbatim JSON.
