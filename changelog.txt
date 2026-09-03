@@ -1,6 +1,45 @@
 Changelog
 =========
 
+0.4.0
+-----
+- Added --profile NAME to every command, so a second Granola account no longer
+  clobbers the first. Every account authorizes against the same MCP endpoint,
+  and credentials were keyed only by endpoint, so a second login silently
+  overwrote the first with no warning and no way back short of re-authorizing.
+  A named profile gets its own mcp-oauth-<name>.json.
+- A profile also namespaces the archive, which is a correctness matter rather
+  than tidiness. The upstream_missing sweep scopes by backend, not by account,
+  so two accounts sharing one archive would each flag the other's meetings as
+  gone from upstream on every full sync; and .sync-state.json holds a single
+  watermark per backend, so the second account would silently skip everything
+  older than the first account's high-water mark. Quietly archiving less than
+  exists is the failure mode that matters for a backup.
+- Without a profile nothing moves. The token stays at mcp-oauth.json and the
+  archive stays at archive/, byte for byte. There is deliberately no profile
+  named "default" -- minting one would rename the credential file every
+  existing user already has and relocate their archive.
+- A named profile outranks GRANOLA_MCP_TOKEN_FILE. A profile says which
+  account, the variable says where the default account's cache lives, and
+  naming an account is the more specific request; the alternative silently
+  ignores --profile for anyone who once set the variable in .env, and a
+  silently ignored flag is the worst of the outcomes. doctor prints both the
+  profile and the resolved file, so nothing is ambiguous.
+- Profile names are validated against ^[a-z0-9][a-z0-9._-]{0,31}$ rather than
+  slugified, because the name becomes a filename. Rewriting "../evil" to
+  "evil" would hide a traversal attempt, and folding two distinct names onto
+  one file would share credentials between accounts -- the exact bug profiles
+  exist to prevent. Names are case-folded so a case-insensitive filesystem and
+  a case-sensitive one agree about which account is which.
+- logout --all removes every profile's credentials. With several accounts,
+  running logout once per profile is precisely the step people skip.
+- doctor now reports the active profile, and lists the others only when there
+  are any, so single-account output is unchanged.
+- Fixed a test fixture that would have written into the developer's real
+  ~/.local/state/granola-exporter: the CLI fixture pinned
+  GRANOLA_MCP_TOKEN_FILE but not XDG_STATE_HOME, which a named profile
+  resolves through.
+
 0.3.0
 -----
 - MCP retries are now per tool. The docs say the budget varies "depending on

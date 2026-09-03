@@ -22,6 +22,7 @@ archive/
 credentials.json
 secrets.json
 *token*.json
+mcp-oauth*.json
 *.granola-key
 
 # ---------------------------------------------------------------------------

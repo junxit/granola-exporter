@@ -17,6 +17,7 @@ from granola_exporter.cli import (
     _config,
     _effective_source,
     _parse_since,
+    _token_path,
     main,
 )
 
@@ -35,10 +36,15 @@ def _isolate_env(monkeypatch, tmp_path):
         "GRANOLA_ARCHIVE_DIR",
         "GRANOLA_SYNC_SOURCE",
         "GRANOLA_MCP_URL",
+        "GRANOLA_MCP_PROFILE",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GRANOLA_ARCHIVE_DIR", str(tmp_path / "archive"))
     monkeypatch.setenv("GRANOLA_MCP_TOKEN_FILE", str(tmp_path / "token.json"))
+    # A named profile deliberately ignores GRANOLA_MCP_TOKEN_FILE and resolves
+    # via the state directory, so without this every profile test would write
+    # into the developer's real ~/.local/state/granola-exporter.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
 def _cfg(api_key: str = "", source: str = "auto") -> Config:
@@ -98,6 +104,132 @@ def test_defaults_when_nothing_is_configured():
     assert config.mcp_url == DEFAULT_MCP_URL
 
 
+# -- profiles ---------------------------------------------------------------
+
+
+def test_no_profile_leaves_every_path_exactly_as_it_was(monkeypatch, tmp_path):
+    """The default stays unnamed, so nothing existing has to move.
+
+    Minting a literal "default" profile would rename the credential file and
+    relocate the archive, orphaning both for every current user.
+    """
+    monkeypatch.setenv("GRANOLA_ARCHIVE_DIR", str(tmp_path / "archive"))
+    config = _config()
+    assert config.profile == ""
+    assert config.archive_dir == (tmp_path / "archive").resolve()
+    assert _token_path(config) == tmp_path / "token.json"
+
+
+def test_profile_namespaces_the_archive(monkeypatch, tmp_path):
+    """Two accounts in one archive corrupt each other's upstream-missing flags."""
+    monkeypatch.setenv("GRANOLA_ARCHIVE_DIR", str(tmp_path / "archive"))
+    assert _config(profile="work").archive_dir == (tmp_path / "archive/work").resolve()
+    assert _config(profile="personal").archive_dir == (
+        tmp_path / "archive/personal"
+    ).resolve()
+
+
+def test_profile_flag_beats_the_environment(monkeypatch):
+    """An explicit --profile wins over GRANOLA_MCP_PROFILE."""
+    monkeypatch.setenv("GRANOLA_MCP_PROFILE", "personal")
+    assert _config(profile="work").profile == "work"
+    assert _config().profile == "personal"
+
+
+def test_profile_is_normalized():
+    """Surrounding space and case are folded before the name becomes a path."""
+    assert _config(profile=" Work ").profile == "work"
+
+
+@pytest.mark.parametrize("name", ["../etc", "a/b", "", "-lead", "x" * 33])
+def test_malformed_profile_is_rejected(name):
+    """A bad name fails at the CLI boundary, before anything touches disk."""
+    with pytest.raises(SystemExit, match="--profile"):
+        _config(profile=name)
+
+
+def test_profile_reaches_every_subcommand():
+    """--profile is accepted by all five subcommands, not just login."""
+    parser_cmds = ["doctor", "login", "logout", "sync", "verify"]
+    for command in parser_cmds:
+        with pytest.raises(SystemExit, match="--profile"):
+            main([command, "--profile", "../etc"])
+
+
+def test_login_uses_the_profile_token_file(monkeypatch, tmp_path):
+    """Authorizing a profile writes that profile's file, not the default."""
+    seen: list = []
+
+    def fake_login(url, *, token_path=None, open_browser=True):
+        seen.append(token_path)
+        return {"email": "oat@granola.ai"}
+
+    monkeypatch.setattr("granola_exporter.mcp_api.login", fake_login)
+    assert main(["login", "--profile", "work"]) == 0
+    assert seen[0].name == "mcp-oauth-work.json"
+    assert seen[0].parent == tmp_path / "state/granola-exporter"
+
+
+def test_logout_removes_only_the_named_profile(monkeypatch, tmp_path, capsys):
+    """Clearing one account must not sign the other out."""
+    base = tmp_path / "state/granola-exporter"
+    base.mkdir(parents=True)
+    for name in ("mcp-oauth-work.json", "mcp-oauth-personal.json"):
+        (base / name).write_text("{}", encoding="utf-8")
+
+    assert main(["logout", "--profile", "work"]) == 0
+    assert "mcp-oauth-work.json" in capsys.readouterr().out
+    assert not (base / "mcp-oauth-work.json").exists()
+    assert (base / "mcp-oauth-personal.json").exists()
+
+
+def test_logout_all_removes_every_profile(monkeypatch, tmp_path, capsys):
+    """With several accounts, logging out once per profile is what gets skipped."""
+    base = tmp_path / "state/granola-exporter"
+    base.mkdir(parents=True)
+    for name in ("mcp-oauth-work.json", "mcp-oauth-personal.json"):
+        (base / name).write_text("{}", encoding="utf-8")
+    (tmp_path / "token.json").write_text("{}", encoding="utf-8")
+
+    assert main(["logout", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "mcp-oauth-work.json" in out
+    assert "mcp-oauth-personal.json" in out
+    assert "token.json" in out
+    assert list(base.glob("mcp-oauth-*.json")) == []
+
+    assert main(["logout", "--all"]) == 0
+    assert "No stored MCP credentials" in capsys.readouterr().out
+
+
+def test_logout_all_rejects_a_named_profile():
+    """--all and --profile are contradictory; neither is silently ignored."""
+    with pytest.raises(SystemExit, match="--all removes every profile"):
+        main(["logout", "--all", "--profile", "work"])
+
+
+def test_doctor_reports_the_profile(capsys):
+    """Which account an invocation is on must never be ambiguous."""
+    main(["doctor", "--source", "public-api"])
+    assert "profile     : (none — default token file)" in capsys.readouterr().out
+
+    main(["doctor", "--source", "public-api", "--profile", "work"])
+    assert "profile     : work" in capsys.readouterr().out
+
+
+def test_doctor_lists_other_profiles_only_when_they_exist(tmp_path, capsys):
+    """Single-account users see nothing new."""
+    main(["doctor", "--source", "public-api"])
+    assert "profiles    :" not in capsys.readouterr().out
+
+    base = tmp_path / "state/granola-exporter"
+    base.mkdir(parents=True)
+    (base / "mcp-oauth-work.json").write_text("{}", encoding="utf-8")
+
+    main(["doctor", "--source", "public-api"])
+    assert "profiles    : work" in capsys.readouterr().out
+
+
 # -- argument parsing ------------------------------------------------------
 
 
@@ -154,7 +286,7 @@ def test_login_does_not_gate_on_a_tty(monkeypatch):
     """
     called: list[bool] = []
 
-    def fake_login(url, *, open_browser=True):
+    def fake_login(url, *, token_path=None, open_browser=True):
         called.append(open_browser)
         return {"email": "oat@granola.ai"}
 

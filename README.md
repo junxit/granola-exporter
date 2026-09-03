@@ -135,9 +135,12 @@ uv run granola-export sync --source mcp --since 2025-01-01
 | --- | --- |
 | `doctor` | Validate credentials, backend reachability and archive location |
 | `login` | Authorize the Granola MCP in a browser (`--no-browser`) |
-| `logout` | Remove the stored MCP credentials |
+| `logout` | Remove the stored MCP credentials (`--all`) |
 | `sync` | Fetch new and changed meetings (`--full`, `-v`, `--source`, `--since`, `--window`, `--refresh-batch`) |
 | `verify` | Check on-disk integrity, provenance and duplicates; reconcile upstream |
+
+Every command also takes `--profile NAME` — see
+[Multiple accounts](#multiple-accounts).
 
 `doctor` and `sync` **never** open a browser: only `login` does. A scheduled
 sync that silently blocked waiting for a browser would be a backup that had
@@ -181,6 +184,85 @@ The archive is **append-mostly by design**:
   one.
 - Renaming a meeting **moves** its directory rather than leaving a duplicate.
 
+## Multiple accounts
+
+Every Granola account authorizes against the same MCP endpoint, so without a
+profile a second `login` silently overwrites the first. `--profile NAME` gives
+an account its own credential file **and** its own archive subdirectory:
+
+```bash
+uv run granola-export login --profile work
+uv run granola-export sync  --profile work        # -> archive/work/
+
+uv run granola-export login --profile personal
+uv run granola-export sync  --profile personal    # -> archive/personal/
+
+uv run granola-export doctor                      # lists the profiles you have
+```
+
+Or set it once per Terminal tab:
+
+```bash
+export GRANOLA_MCP_PROFILE=work
+```
+
+A name may be 1–32 characters of letters, digits, `.`, `-` or `_`, starting
+with a letter or digit; it is case-folded, and anything else is refused rather
+than silently rewritten. A named profile ignores `GRANOLA_MCP_TOKEN_FILE`,
+which names one exact file and so cannot also hold a family of them.
+
+**Without a profile, nothing changes**: the credential stays at
+`mcp-oauth.json` and the archive stays at `archive/`. There is no profile
+called `default`, deliberately — minting one would rename the file you already
+have and relocate your archive. To adopt a profile for an account you have
+already been syncing, move the archive yourself once:
+
+```bash
+mv archive archive-tmp && mkdir archive && mv archive-tmp archive/personal
+```
+
+**The archive is namespaced for a reason.** Two accounts sharing one archive
+corrupt each other's bookkeeping: the `upstream_missing` sweep scopes by
+*backend*, not by account, so a full sync as one account flags every one of the
+other's meetings as gone from upstream; and `.sync-state.json` holds a single
+watermark per backend, so the second account silently skips every meeting older
+than the first account's high-water mark. Nothing is deleted either way, but a
+backup that quietly archives less than exists is the failure that matters.
+
+### Credentials that do not outlive the session
+
+`login` has to write to disk — `login` and `sync` are separate processes, so
+there is nowhere else to keep the grant. The access token lasts about six
+hours; the file stays until you remove it.
+
+**With an API key, nothing is written at all.** The key is read from the
+environment and sent as a bearer header; this tool never persists it:
+
+```bash
+GRANOLA_API_KEY=$(op read 'op://Private/Granola/key') \
+GRANOLA_ARCHIVE_DIR=./archive-work \
+  uv run granola-export sync --source public-api
+```
+
+Note that `.env` *is* disk — it is read on every run — and so is shell history;
+`op read`, or a leading space with `setopt histignorespace`, avoids both.
+
+**On the MCP, which has no keyless mode**, scope the cache to a temp directory
+and delete it when the shell exits:
+
+```bash
+export GRANOLA_MCP_TOKEN_FILE="$(mktemp -d)/mcp-oauth.json"
+trap 'rm -rf "$(dirname "$GRANOLA_MCP_TOKEN_FILE")"' EXIT
+
+uv run granola-export login
+uv run granola-export sync
+```
+
+That costs one browser round-trip per session. Profiles are the persistent
+alternative; `granola-export logout --all` is the blunt one, removing every
+profile's credentials in the state directory (it cannot reach a file you
+placed elsewhere with `GRANOLA_MCP_TOKEN_FILE`).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -189,7 +271,8 @@ The archive is **append-mostly by design**:
 | `GRANOLA_ARCHIVE_DIR` | `./archive` | Where the archive is written |
 | `GRANOLA_SYNC_SOURCE` | `auto` | `auto`, `public-api` or `mcp` |
 | `GRANOLA_MCP_URL` | `https://mcp.granola.ai/mcp` | MCP endpoint |
-| `GRANOLA_MCP_TOKEN_FILE` | `$XDG_STATE_HOME/granola-exporter/mcp-oauth.json` | OAuth token cache |
+| `GRANOLA_MCP_PROFILE` | — | Credential profile; overridden by `--profile` |
+| `GRANOLA_MCP_TOKEN_FILE` | `$XDG_STATE_HOME/granola-exporter/mcp-oauth.json` | OAuth token cache. Ignored when a profile is named |
 
 `.env` is gitignored. `archive/` is gitignored too, since it holds private
 meeting content — remove that line from `.gitignore` only if you deliberately
@@ -333,10 +416,19 @@ The archive can contain highly sensitive meeting content, so:
   XXE are out of the threat model by construction rather than by configuring a
   parser correctly.
 - The MCP OAuth token is stored outside the archive at
-  `$XDG_STATE_HOME/granola-exporter/mcp-oauth.json`, mode `0600`, keyed by
-  endpoint. `granola-export logout` removes it. The OAuth redirect listener
-  binds `127.0.0.1` only, serves one request, and never reflects query
-  parameters back into the page.
+  `$XDG_STATE_HOME/granola-exporter/mcp-oauth.json` — or
+  `mcp-oauth-<profile>.json` — mode `0600`, keyed by endpoint.
+  `granola-export logout [--all]` removes it. The OAuth redirect listener binds
+  `127.0.0.1` only, serves one request, and never reflects query parameters
+  back into the page.
+- Profile names are validated against `^[a-z0-9][a-z0-9._-]{0,31}$` rather than
+  slugified, so a name can only ever be a single path component and cannot
+  escape the state directory. Rejecting beats rewriting: turning `../evil` into
+  `evil` would hide a traversal attempt, and folding two names onto one file
+  would share credentials between accounts.
+- The public API key is **never written to disk by this tool** — it is read
+  from the environment and sent as a bearer header — so `.env` is the only
+  place it persists.
 - `index.json` is treated as untrusted input; entries resolving outside the
   archive root are refused.
 - Neither `.env` nor `archive/` is ever committed.

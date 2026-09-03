@@ -6,6 +6,7 @@ stop those defects from silently returning:
 * untrusted note ids must not build paths outside the archive root
 * a tampered ``index.json`` must not redirect writes outside the archive
 * archived content and its directories must not be world-readable
+* a credential profile name must not build a path outside the state directory
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from granola_exporter.mcp_auth import MCPAuthError, state_dir, token_store_path
 from granola_exporter.models import (
     Note,
     is_valid_archive_key,
@@ -337,3 +339,42 @@ def test_note_dir_accepts_both_namespaces_inside_root(tmp_path, note_payload):
         target = archive.note_dir(note)
         assert archive.root in target.parents
         assert note_id in target.name
+
+
+# -- credential profile names ----------------------------------------------
+#
+# A profile name is interpolated into the token cache filename, so it is the
+# same finding class as the note-id traversal tests above.
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 4, 5, 6, 7])
+def test_traversing_profile_names_never_escape(monkeypatch, tmp_path, depth: int):
+    """A traversal-shaped profile is refused before any path is built."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    with pytest.raises(MCPAuthError):
+        token_store_path("../" * depth + "tmp/pwned")
+
+
+@pytest.mark.parametrize(
+    "name", ["/etc/shadow", "a/b", "a\\b", "..", ".", "~root", "x" * 33, "na\x00me"]
+)
+def test_malformed_profile_names_never_build_a_path(monkeypatch, tmp_path, name: str):
+    """Absolute, separator-bearing and oversized names are all refused."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    with pytest.raises(MCPAuthError):
+        token_store_path(name)
+
+
+@pytest.mark.parametrize("name", ["work", "personal-2", "a.b_c", "9", "x" * 32])
+def test_accepted_profile_names_stay_in_the_state_directory(
+    monkeypatch, tmp_path, name: str
+):
+    """Containment is proven by the allowlist; this pins it.
+
+    The regex admits only a single path component, so no runtime containment
+    check is needed -- but the guarantee is asserted rather than assumed.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    path = token_store_path(name)
+    assert path.parent == state_dir()
+    assert path.name == f"mcp-oauth-{name}.json"

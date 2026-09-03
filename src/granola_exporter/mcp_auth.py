@@ -6,6 +6,11 @@ to persist a token, which this module does with the same posture the archive
 uses -- 0600 in a 0700 directory -- and outside the archive, so backing the
 archive up or syncing it elsewhere never carries credentials.
 
+Credentials are keyed by endpoint and, optionally, by *profile*. Every Granola
+account authorizes against the same server, so without a profile a second
+login silently overwrites the first; a named profile gets its own file so two
+accounts can coexist.
+
 The MCP SDK is imported lazily inside the methods that need it, so ``doctor``
 can report authentication state without paying for the SDK import or touching
 the network.
@@ -32,6 +37,18 @@ STORAGE_VERSION = 1
 DEFAULT_CALLBACK_PATH = "/callback"
 DEFAULT_CALLBACK_TIMEOUT = 300.0
 
+# A profile name becomes one component of a filename, so it is validated
+# against an anchored allowlist rather than slugified. Nothing matching this
+# can contain "/", "\", "..", NUL, whitespace or a drive letter, so it is safe
+# to interpolate into a path -- the same argument MCP_NOTE_ID_RE already makes
+# for note ids. Slugifying instead would turn "../evil" into "evil", hiding a
+# traversal attempt, and could fold two distinct names onto one file, which is
+# precisely the credential sharing profiles exist to prevent.
+PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+
+PROFILE_PREFIX = "mcp-oauth-"
+DEFAULT_TOKEN_NAME = "mcp-oauth.json"
+
 _SUCCESS_BODY = (
     b"<!doctype html><meta charset=utf-8><title>granola-exporter</title>"
     b"<body style='font-family:system-ui;padding:3rem'>"
@@ -49,23 +66,112 @@ class MCPAuthError(RuntimeError):
     """Raised when the MCP cannot be authenticated."""
 
 
-def token_store_path() -> Path:
+def normalize_profile(value: Any) -> str:
+    """Fold a profile name to its canonical form.
+
+    Case is folded because a case-insensitive filesystem (APFS) and a
+    case-sensitive one (ext4) would otherwise disagree about whether
+    ``--profile Work`` and ``--profile work`` name one account or two.
+
+    Args:
+        value: A candidate profile name, of any type.
+
+    Returns:
+        The stripped, lowercased name, or ``""`` for anything that is not a
+        string -- ``""`` being the sentinel for "no profile".
+    """
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def is_valid_profile(value: Any) -> bool:
+    """Check that a value is a well-formed profile name.
+
+    Args:
+        value: A candidate profile name, of any type.
+
+    Returns:
+        ``True`` if the normalized name is safe to use as a filename
+        component. ``""`` is not a valid *name*; callers treat it as the
+        absence of a profile and never validate it.
+    """
+    return bool(PROFILE_RE.fullmatch(normalize_profile(value)))
+
+
+def state_dir() -> Path:
+    """The directory profile credentials live in.
+
+    Deliberately ignores ``GRANOLA_MCP_TOKEN_FILE``: that variable names one
+    exact file, which cannot also serve as a directory holding a family of
+    them.
+
+    Returns:
+        ``$XDG_STATE_HOME/granola-exporter``, or the default beneath ``~``.
+    """
+    state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    base = Path(state_home).expanduser() if state_home else Path.home() / ".local/state"
+    return base / "granola-exporter"
+
+
+def token_store_path(profile: str = "") -> Path:
     """Resolve where the OAuth token cache lives.
 
-    Honors ``GRANOLA_MCP_TOKEN_FILE`` then ``XDG_STATE_HOME``, defaulting to
-    ``~/.local/state/granola-exporter/mcp-oauth.json``. Deliberately outside
-    the archive directory: the archive is something a user may back up or sync
-    to another machine, and credentials must not travel with it.
+    Precedence, most specific first: a named ``profile``, then
+    ``GRANOLA_MCP_TOKEN_FILE``, then ``XDG_STATE_HOME``, defaulting to
+    ``~/.local/state/granola-exporter/mcp-oauth.json``. A profile outranks the
+    explicit file because a profile says *which account* while the file says
+    *where the default account's cache lives*, and naming an account is the
+    more specific request; the alternative silently ignores ``--profile`` for
+    anyone who once set the variable in ``.env``, and a silently ignored flag
+    is the worst of the outcomes. ``doctor`` prints both, so nothing is
+    ambiguous.
+
+    All of these sit outside the archive directory: the archive is something a
+    user may back up or sync to another machine, and credentials must not
+    travel with it.
+
+    Args:
+        profile: A credential profile name, or ``""`` for the default.
 
     Returns:
         The token cache path.
+
+    Raises:
+        MCPAuthError: If ``profile`` is given but not well-formed.
     """
+    name = normalize_profile(profile)
+    if name:
+        if not is_valid_profile(name):
+            raise MCPAuthError(f"invalid profile name: {profile!r}")
+        return state_dir() / f"{PROFILE_PREFIX}{name}.json"
+
     override = os.environ.get("GRANOLA_MCP_TOKEN_FILE", "").strip()
     if override:
         return Path(override).expanduser()
-    state_home = os.environ.get("XDG_STATE_HOME", "").strip()
-    base = Path(state_home).expanduser() if state_home else Path.home() / ".local/state"
-    return base / "granola-exporter" / "mcp-oauth.json"
+    return state_dir() / DEFAULT_TOKEN_NAME
+
+
+def known_profiles() -> list[str]:
+    """List the profiles that have a credential file on this machine.
+
+    A glob rather than a registry: there is nothing to keep in sync and
+    nothing to corrupt, and it answers the first question multi-account use
+    raises -- what the second account was called. The default
+    ``mcp-oauth.json`` does not match, nor do the ``.json.tmp`` files
+    ``write_json`` renames away.
+
+    Names that this tool could never have written are skipped, so one
+    hand-created oddity cannot abort a ``logout --all`` sweep over the files
+    that *are* ours.
+
+    Returns:
+        The profile names, sorted. Empty on a machine that has never logged
+        in, or when a file has since been removed.
+    """
+    return sorted(
+        name
+        for path in state_dir().glob(f"{PROFILE_PREFIX}*.json")
+        if is_valid_profile(name := path.name[len(PROFILE_PREFIX) : -len(".json")])
+    )
 
 
 @dataclass(slots=True)

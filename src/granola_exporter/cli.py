@@ -10,6 +10,10 @@ Commands:
 Two backends are supported. The public API is preferred wherever a key exists;
 the MCP is a fallback for accounts that cannot create one, never an upgrade
 path away from the higher-fidelity source.
+
+``--profile NAME`` scopes an invocation to one Granola account: its own
+credential file and its own archive subdirectory. Without it, paths are
+exactly what they have always been, so nothing existing has to move.
 """
 
 from __future__ import annotations
@@ -43,26 +47,50 @@ class Config:
     archive_dir: Path
     source: str
     mcp_url: str
+    profile: str = ""
 
 
-def _config(requested: str | None = None) -> Config:
+def _config(requested: str | None = None, profile: str | None = None) -> Config:
     """Load configuration from the environment and ``.env``.
 
     Precedence is the real environment, then ``.env``, then the defaults --
     ``python-dotenv`` does not override an already-set variable.
 
+    A named profile also namespaces the archive. Two accounts sharing one
+    archive is not merely untidy: ``mark_upstream_missing`` sweeps by *source*
+    rather than by account, so each full sync would flag the other account's
+    meetings as gone from upstream, and ``.sync-state.json`` holds a single
+    watermark per source, so the second account would silently skip everything
+    older than the first account's high-water mark.
+
     Args:
         requested: An explicit ``--source``, overriding ``GRANOLA_SYNC_SOURCE``.
+        profile: An explicit ``--profile``, overriding ``GRANOLA_MCP_PROFILE``.
 
     Returns:
         The resolved configuration.
+
+    Raises:
+        SystemExit: If the profile name is not well-formed.
     """
+    from .mcp_auth import is_valid_profile, normalize_profile
+
     load_dotenv()
+    # An explicit --profile is validated even when it normalizes to nothing,
+    # so `--profile ""` reports an error rather than silently meaning "none".
+    name = normalize_profile(
+        profile if profile is not None else os.environ.get("GRANOLA_MCP_PROFILE", "")
+    )
+    if (name or profile is not None) and not is_valid_profile(name):
+        raise SystemExit(
+            "--profile expects 1-32 characters of letters, digits, '.', '-' or "
+            f"'_', starting with a letter or digit, got {name!r}"
+        )
+
+    archive_dir = Path(os.environ.get("GRANOLA_ARCHIVE_DIR", DEFAULT_ARCHIVE).strip())
     return Config(
         api_key=os.environ.get("GRANOLA_API_KEY", "").strip(),
-        archive_dir=Path(
-            os.environ.get("GRANOLA_ARCHIVE_DIR", DEFAULT_ARCHIVE).strip()
-        )
+        archive_dir=(archive_dir / name if name else archive_dir)
         .expanduser()
         .resolve(),
         source=(
@@ -71,6 +99,7 @@ def _config(requested: str | None = None) -> Config:
         or SOURCE_AUTO,
         mcp_url=os.environ.get("GRANOLA_MCP_URL", DEFAULT_MCP_URL).strip()
         or DEFAULT_MCP_URL,
+        profile=name,
     )
 
 
@@ -88,6 +117,23 @@ def _effective_source(config: Config) -> str:
     return "public-api" if config.api_key else "mcp"
 
 
+def _token_path(config: Config) -> Path:
+    """Resolve the credential file for this invocation's profile.
+
+    The single place that knows the profile-to-path rule, so the five
+    subcommands cannot drift apart on it.
+
+    Args:
+        config: The loaded configuration.
+
+    Returns:
+        The token cache path.
+    """
+    from .mcp_auth import token_store_path
+
+    return token_store_path(config.profile)
+
+
 def _mcp_storage(config: Config):
     """Build a token store for the configured endpoint.
 
@@ -99,9 +145,9 @@ def _mcp_storage(config: Config):
     Returns:
         A ``FileTokenStorage`` for the configured MCP endpoint.
     """
-    from .mcp_auth import FileTokenStorage, token_store_path
+    from .mcp_auth import FileTokenStorage
 
-    return FileTokenStorage(token_store_path(), config.mcp_url)
+    return FileTokenStorage(_token_path(config), config.mcp_url)
 
 
 def _parse_since(value: str | None) -> date | None:
@@ -139,13 +185,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     Returns:
         Process exit code.
     """
-    config = _config(getattr(args, "source", None))
+    from .mcp_auth import known_profiles
+
+    config = _config(getattr(args, "source", None), getattr(args, "profile", None))
     effective = _effective_source(config)
     archive = Archive(config.archive_dir)
     index = archive.load_index()
 
     print("granola-exporter doctor")
     print(f"  archive dir : {config.archive_dir}")
+    print(f"  profile     : {config.profile or '(none — default token file)'}")
+    # Listed only when there are others, so single-account users see nothing
+    # new: "what did I call the second account" is a multi-account question.
+    others = [name for name in known_profiles() if name != config.profile]
+    if others:
+        print(f"  profiles    : {', '.join(others)}")
     reason = "" if config.source != SOURCE_AUTO else (
         " (auto: GRANOLA_API_KEY set)"
         if config.api_key
@@ -252,7 +306,9 @@ def _doctor_mcp(config: Config) -> bool:
         return True
 
     try:
-        with MCPClient(config.mcp_url, allow_login=False) as client:
+        with MCPClient(
+            config.mcp_url, token_path=_token_path(config), allow_login=False
+        ) as client:
             tools = client.tool_names()
             print(f"  mcp tools   : OK ({len(tools)})")
             missing = EXPECTED_TOOLS - set(tools)
@@ -289,18 +345,23 @@ def cmd_login(args: argparse.Namespace) -> int:
     from .mcp_api import MCPError, login
     from .mcp_auth import MCPAuthError
 
-    config = _config()
+    config = _config(profile=getattr(args, "profile", None))
     # Deliberately no TTY check. This flow never reads stdin -- it opens a
     # browser and waits on a loopback socket -- so a piped or captured stdin
     # says nothing about whether authorization can succeed. Whether a browser
     # actually opens is discovered by trying, and the URL is printed either way.
     try:
-        account = login(config.mcp_url, open_browser=not args.no_browser)
+        account = login(
+            config.mcp_url,
+            token_path=_token_path(config),
+            open_browser=not args.no_browser,
+        )
     except (MCPAuthError, MCPError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Authorized as {account.get('email', '?')}")
+    suffix = f" (profile: {config.profile})" if config.profile else ""
+    print(f"Authorized as {account.get('email', '?')}{suffix}")
     workspace = account.get("active_workspace") or {}
     if workspace:
         print(f"Workspace: {workspace.get('display_name', '?')}")
@@ -313,16 +374,36 @@ def cmd_login(args: argparse.Namespace) -> int:
 def cmd_logout(args: argparse.Namespace) -> int:
     """Remove the stored MCP credentials.
 
+    ``--all`` sweeps every profile, which is what makes "leave nothing behind"
+    practical: with several accounts, running ``logout`` once per profile is
+    exactly the step people skip.
+
     Args:
         args: Parsed command-line arguments.
 
     Returns:
         Process exit code.
+
+    Raises:
+        SystemExit: If ``--all`` is combined with ``--profile``.
     """
-    storage = _mcp_storage(_config())
-    if storage.clear():
-        print(f"Removed {storage.path}")
+    from .mcp_auth import known_profiles
+
+    profile = getattr(args, "profile", None)
+    if getattr(args, "all", False):
+        if profile is not None:
+            raise SystemExit("--all removes every profile; drop --profile")
+        targets = [None, *known_profiles()]
     else:
+        targets = [profile]
+
+    removed = False
+    for name in targets:
+        storage = _mcp_storage(_config(profile=name))
+        if storage.clear():
+            print(f"Removed {storage.path}")
+            removed = True
+    if not removed:
         print("No stored MCP credentials.")
     return 0
 
@@ -339,7 +420,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     Returns:
         Process exit code.
     """
-    config = _config(args.source)
+    config = _config(args.source, getattr(args, "profile", None))
     effective = _effective_source(config)
     archive = Archive(config.archive_dir)
     opts = SyncOptions(
@@ -400,7 +481,9 @@ def _sync_via_mcp(archive: Archive, config: Config, opts: SyncOptions):
     try:
         # allow_login=False on purpose: a scheduled sync that silently blocks
         # waiting for a browser is a backup that has stopped working.
-        with MCPClient(config.mcp_url, allow_login=False) as client:
+        with MCPClient(
+            config.mcp_url, token_path=_token_path(config), allow_login=False
+        ) as client:
             return sync_mcp(archive, client, opts, server_url=config.mcp_url)
     except MCPAuthError as exc:
         archive.save_index()
@@ -422,7 +505,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     Returns:
         Process exit code.
     """
-    config = _config(getattr(args, "source", None))
+    config = _config(getattr(args, "source", None), getattr(args, "profile", None))
     archive = Archive(config.archive_dir)
     index = archive.load_index()
 
@@ -538,7 +621,9 @@ def _verify_against_mcp(
         return
 
     try:
-        with MCPClient(config.mcp_url, allow_login=False) as client:
+        with MCPClient(
+            config.mcp_url, token_path=_token_path(config), allow_login=False
+        ) as client:
             print("  folder counts (MCP vs archived, joined by name):")
             for folder in client.list_folders():
                 name = str(folder.get("title") or folder.get("name") or "")
@@ -603,8 +688,18 @@ def main(argv: list[str] | None = None) -> int:
             help="backend to use (default: auto — public API when a key exists)",
         )
 
+    def add_profile(target: argparse.ArgumentParser) -> None:
+        target.add_argument(
+            "--profile",
+            metavar="NAME",
+            default=None,
+            help="scope to one Granola account: its own credential file and "
+            "its own archive subdirectory (default: GRANOLA_MCP_PROFILE)",
+        )
+
     doctor = sub.add_parser("doctor", help="validate config and backend reachability")
     add_source(doctor)
+    add_profile(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
     login_parser = sub.add_parser("login", help="authorize the Granola MCP")
@@ -613,13 +708,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the authorization URL instead of opening a browser",
     )
+    add_profile(login_parser)
     login_parser.set_defaults(func=cmd_login)
 
     logout_parser = sub.add_parser("logout", help="remove stored MCP credentials")
+    add_profile(logout_parser)
+    logout_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="remove every profile's credentials; cannot reach a file placed "
+        "elsewhere by GRANOLA_MCP_TOKEN_FILE",
+    )
     logout_parser.set_defaults(func=cmd_logout)
 
     sync = sub.add_parser("sync", help="fetch new and changed meetings")
     add_source(sync)
+    add_profile(sync)
     sync.add_argument(
         "--full",
         action="store_true",
@@ -649,6 +753,7 @@ def main(argv: list[str] | None = None) -> int:
 
     verify = sub.add_parser("verify", help="check integrity and reconcile with a backend")
     add_source(verify)
+    add_profile(verify)
     verify.add_argument(
         "--deep",
         action="store_true",

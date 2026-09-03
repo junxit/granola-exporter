@@ -19,7 +19,11 @@ from granola_exporter.mcp_auth import (
     FileTokenStorage,
     LoopbackCallbackServer,
     MCPAuthError,
+    is_valid_profile,
+    known_profiles,
+    normalize_profile,
     redact,
+    state_dir,
     token_store_path,
 )
 from granola_exporter.secure_io import DIR_MODE, FILE_MODE
@@ -64,6 +68,135 @@ def test_token_path_honors_overrides(monkeypatch, tmp_path):
 
     monkeypatch.setenv("GRANOLA_MCP_TOKEN_FILE", str(tmp_path / "explicit.json"))
     assert token_store_path() == tmp_path / "explicit.json"
+
+
+# -- profiles ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../evil",
+        "a/b",
+        "a\\b",
+        "/abs",
+        "",
+        " ",
+        ".",
+        "..",
+        "-lead",
+        "_lead",
+        ".hidden",
+        "na\x00me",
+        "tab\tname",
+        "spaced name",
+        "~root",
+        "c:name",
+        "x" * 33,
+        None,
+        123,
+    ],
+)
+def test_malformed_profile_names_are_rejected(name):
+    """A profile name becomes a filename, so it is validated, never mangled.
+
+    Slugifying instead would turn ``../evil`` into ``evil``, hiding a
+    traversal attempt, and could fold two distinct names onto one credential
+    file -- the exact credential sharing profiles exist to prevent.
+    """
+    assert not is_valid_profile(name)
+
+
+@pytest.mark.parametrize("name", ["work", "personal-2", "a.b_c", "x" * 32, "9"])
+def test_well_formed_profile_names_are_accepted(name):
+    """Ordinary account nicknames pass."""
+    assert is_valid_profile(name)
+
+
+def test_profile_names_are_case_folded():
+    """Case folding keeps APFS and ext4 from disagreeing about identity.
+
+    Without it, ``--profile Work`` and ``--profile work`` name one account on
+    a case-insensitive filesystem and two on a case-sensitive one.
+    """
+    assert normalize_profile(" Work ") == "work"
+    assert normalize_profile("WORK") == normalize_profile("work")
+    assert normalize_profile(None) == ""
+    assert normalize_profile(123) == ""
+
+
+def test_a_profile_gets_its_own_file_in_the_state_dir(monkeypatch, tmp_path):
+    """Two accounts, two files -- the whole point of the feature."""
+    monkeypatch.delenv("GRANOLA_MCP_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+
+    base = tmp_path / "xdg/granola-exporter"
+    assert token_store_path("work") == base / "mcp-oauth-work.json"
+    assert token_store_path(" WORK ") == base / "mcp-oauth-work.json"
+    assert token_store_path("personal") == base / "mcp-oauth-personal.json"
+    assert token_store_path() == base / "mcp-oauth.json"
+
+
+def test_a_profile_ignores_the_token_file_override(monkeypatch, tmp_path):
+    """A profile names an account; the override names the default's location.
+
+    Naming an account is the more specific request, and the alternative --
+    the override always winning -- silently ignores ``--profile`` for anyone
+    who once set the variable in ``.env``.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("GRANOLA_MCP_TOKEN_FILE", str(tmp_path / "explicit.json"))
+
+    assert token_store_path() == tmp_path / "explicit.json"
+    assert token_store_path("work") == (
+        tmp_path / "xdg/granola-exporter/mcp-oauth-work.json"
+    )
+
+
+def test_token_store_path_refuses_a_traversing_profile(monkeypatch, tmp_path):
+    """Validation happens where the name is interpolated, not only at the CLI."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    with pytest.raises(MCPAuthError, match="invalid profile"):
+        token_store_path("../../etc/passwd")
+
+
+def test_profiles_do_not_share_credentials(monkeypatch, tmp_path):
+    """The bug this exists to fix: a second login must not clobber the first."""
+    monkeypatch.delenv("GRANOLA_MCP_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+
+    work = FileTokenStorage(token_store_path("work"), SERVER)
+    _seed(work)
+
+    assert work.status().present
+    assert not FileTokenStorage(token_store_path("personal"), SERVER).status().present
+    assert not FileTokenStorage(token_store_path(), SERVER).status().present
+
+
+def test_known_profiles_lists_only_profile_files(monkeypatch, tmp_path):
+    """A glob, not a registry -- nothing to keep in sync or corrupt."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    base = state_dir()
+    base.mkdir(parents=True)
+    for name in (
+        "mcp-oauth.json",
+        "mcp-oauth-work.json",
+        "mcp-oauth-personal.json",
+        "mcp-oauth-stale.json.tmp",
+        "notes.json",
+        # Never written by this tool; skipping it keeps one hand-created
+        # oddity from aborting a `logout --all` sweep over the real files.
+        "mcp-oauth-BAD NAME.json",
+    ):
+        (base / name).write_text("{}", encoding="utf-8")
+
+    assert known_profiles() == ["personal", "work"]
+
+
+def test_known_profiles_on_a_fresh_machine(monkeypatch, tmp_path):
+    """Nobody has logged in yet, and that is not an error."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "nothing-here"))
+    assert known_profiles() == []
 
 
 def test_credentials_are_owner_only(tmp_path):

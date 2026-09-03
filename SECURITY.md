@@ -28,7 +28,23 @@ meeting transcripts to disk, so the concerns that matter most are:
   **outside the archive**: the archive is something a user may back up or sync
   to another machine, and credentials must not travel with it. The file records
   which endpoint it belongs to, so repointing `GRANOLA_MCP_URL` never silently
-  reuses another server's credentials. `granola-export logout` removes it.
+  reuses another server's credentials. `granola-export logout` removes it, and
+  `logout --all` removes every profile's — note that both are local deletes,
+  with no server-side revocation.
+- **Credential profiles.** `--profile NAME` gives an account its own
+  `mcp-oauth-<name>.json` in the same `0700` directory at the same `0600` mode,
+  so a second account cannot silently overwrite the first. The name is
+  validated against `^[a-z0-9][a-z0-9._-]{0,31}$` rather than slugified: it can
+  only ever be a single path component, so it cannot escape the state
+  directory, and two distinct names can never fold onto one credential file.
+  Traversal-shaped names are refused before any path is built, with regression
+  tests in `tests/test_security.py`. A named profile deliberately ignores
+  `GRANOLA_MCP_TOKEN_FILE`, which names one exact file and cannot also hold a
+  family of them.
+- **The public API key is never written to disk by this tool.** It is read from
+  the environment and sent as a bearer header, so `.env` is the only place it
+  persists — omitting `.env` in favor of a per-session environment variable
+  leaves no credential on disk at all.
 - **The OAuth redirect.** The loopback listener binds `127.0.0.1` explicitly,
   serves exactly one request on `/callback`, refuses any other path, and never
   reflects query parameters into the response body. Only `granola-export login`
