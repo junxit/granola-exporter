@@ -317,9 +317,20 @@ class _FakeMCPClient:
 
     folders: list = []
     listing: str = ""
+    email: str = "oat@granola.ai"
 
     def __init__(self, *a, **k) -> None:
         """Accept whatever the CLI passes."""
+
+    def account_info(self):
+        """Identify the authorized account for the sync guard."""
+        return {"email": type(self).email}
+
+    def tool_names(self):
+        """Report the tools doctor expects to find."""
+        from granola_exporter.mcp_api import EXPECTED_TOOLS
+
+        return sorted(EXPECTED_TOOLS)
 
     def __enter__(self):
         """Enter the context manager."""
@@ -404,3 +415,141 @@ def test_verify_deep_reports_no_gap_on_an_empty_archive(capsys, tmp_path, monkey
     out = capsys.readouterr().out
     assert "upstream meetings  : 0" in out
     assert "gap                : none" in out
+
+
+# -- account identity guard -------------------------------------------------
+
+
+_EMPTY_LISTING = (
+    '<meetings_data from="Jan 1, 2026" to="Jan 2, 2026" count="0">\n</meetings_data>'
+)
+
+
+def _seed_archive(tmp_path, email: str):
+    """Claim the configured archive for an account.
+
+    Args:
+        tmp_path: pytest temp directory.
+        email: The account to record.
+
+    Returns:
+        The claimed archive.
+    """
+    from granola_exporter.store import Archive
+
+    archive = Archive(tmp_path / "archive")
+    archive.claim_account(email, "granola-mcp")
+    return archive
+
+
+def test_profile_does_not_inherit_the_default_api_key(monkeypatch):
+    """The root cause: a profile must not authenticate as the default account.
+
+    Without this, `sync --profile work` silently uses the personal key and
+    writes the wrong person's meetings into the work archive.
+    """
+    monkeypatch.setenv("GRANOLA_API_KEY", "grn_personal")
+
+    assert _effective_source(_config()) == "public-api"
+    assert _effective_source(_config(profile="work")) == "mcp"
+
+    monkeypatch.setenv("GRANOLA_API_KEY_WORK", "grn_work")
+    assert _effective_source(_config(profile="work")) == "public-api"
+    assert _config(profile="work").api_key == "grn_work"
+
+
+def test_api_key_var_maps_profile_names():
+    """Profile names admit '.', '-' and '_', env vars only '_'."""
+    from granola_exporter.cli import api_key_var
+
+    assert api_key_var("") == "GRANOLA_API_KEY"
+    assert api_key_var("work") == "GRANOLA_API_KEY_WORK"
+    assert api_key_var("personal-2") == "GRANOLA_API_KEY_PERSONAL_2"
+    assert api_key_var("a.b") == "GRANOLA_API_KEY_A_B"
+
+
+def test_sync_refuses_a_different_account(tmp_path, monkeypatch, capsys):
+    """The reported bug: a mismatched sync must stop before writing."""
+    import granola_exporter.mcp_api as api
+
+    _seed_archive(tmp_path, "work@company.com")
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "personal@gmail.com")
+
+    assert main(["sync", "--source", "mcp"]) == 1
+    err = capsys.readouterr().err
+    assert "work@company.com" in err
+    assert "personal@gmail.com" in err
+    assert "--allow-account-change" in err
+
+    from granola_exporter.store import Archive
+
+    assert Archive(tmp_path / "archive").account_email == "work@company.com", (
+        "a refused sync must not re-claim the archive"
+    )
+    assert not (tmp_path / "archive" / "index.json").exists(), (
+        "a refused sync must not write"
+    )
+
+
+def test_sync_allows_a_matching_account(tmp_path, monkeypatch, capsys):
+    """The common case stays silent."""
+    import granola_exporter.mcp_api as api
+
+    _seed_archive(tmp_path, "oat@granola.ai")
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "oat@granola.ai")
+    monkeypatch.setattr(_FakeMCPClient, "listing", _EMPTY_LISTING)
+
+    main(["sync", "--source", "mcp"])
+    assert "--allow-account-change" not in capsys.readouterr().err
+
+
+def test_allow_account_change_reclaims(tmp_path, monkeypatch, capsys):
+    """Forcing is possible, and says what it did."""
+    import granola_exporter.mcp_api as api
+
+    _seed_archive(tmp_path, "work@company.com")
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "personal@gmail.com")
+
+    main(["sync", "--source", "mcp", "--allow-account-change"])
+    assert "re-claimed" in capsys.readouterr().err
+
+    from granola_exporter.store import Archive
+
+    assert Archive(tmp_path / "archive").account_email == "personal@gmail.com"
+
+
+def test_unclaimed_empty_archive_is_adopted(tmp_path, monkeypatch):
+    """A first sync claims the archive rather than refusing."""
+    import granola_exporter.mcp_api as api
+
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "oat@granola.ai")
+    monkeypatch.setattr(_FakeMCPClient, "listing", _EMPTY_LISTING)
+
+    main(["sync", "--source", "mcp"])
+
+    from granola_exporter.store import Archive
+
+    assert Archive(tmp_path / "archive").account_email == "oat@granola.ai"
+
+
+def test_doctor_warns_on_a_mismatch_without_failing(tmp_path, monkeypatch, capsys):
+    """A diagnostic that refuses to run is not a diagnostic."""
+    import granola_exporter.mcp_api as api
+
+    _seed_archive(tmp_path, "work@company.com")
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "personal@gmail.com")
+
+    assert main(["doctor", "--source", "mcp"]) == 0
+    out = capsys.readouterr().out
+    assert "account     : work@company.com" in out
+    assert "WARNING" in out

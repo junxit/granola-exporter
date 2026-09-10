@@ -44,7 +44,18 @@ meeting transcripts to disk, so the concerns that matter most are:
 - **The public API key is never written to disk by this tool.** It is read from
   the environment and sent as a bearer header, so `.env` is the only place it
   persists — omitting `.env` in favor of a per-session environment variable
-  leaves no credential on disk at all.
+  leaves no credential on disk at all. A named profile reads
+  `GRANOLA_API_KEY_<PROFILE>` and **never falls back** to `GRANOLA_API_KEY`:
+  inheriting the default key silently authenticates one profile as another
+  account.
+- **An archive records the account it belongs to** and a sync refuses to write
+  a different one into it, naming both addresses and exiting before anything is
+  fetched. Two people's meetings in one archive cannot be untangled afterwards
+  — the `upstream_missing` sweep scopes by backend rather than by account, and
+  the index records no per-note owner to sort them out by. `doctor` and `verify`
+  report the mismatch as a warning; only `sync --allow-account-change` proceeds.
+  Identity is `get_account_info` on the MCP, and the dominant note owner on the
+  public API, which exposes no account endpoint.
 - **The OAuth redirect.** The loopback listener binds `127.0.0.1` explicitly,
   serves exactly one request on `/callback`, refuses any other path, and never
   reflects query parameters into the response body. Only `granola-export login`

@@ -84,6 +84,11 @@ _ROOT_OPEN_RE = re.compile(rf"<{MEETINGS_ROOT}\b[^>]*>", re.DOTALL)
 _PARTICIPANTS_RE = re.compile(
     r"<known_participants>(.*?)</known_participants>", re.DOTALL
 )
+
+# Shared by _user_from_label and creator_email: one reads the marker, the
+# other strips it, and they must agree on where it sits.
+_LABEL_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<email>[^>]+)>\s*$")
+_CREATOR_SUFFIX_RE = re.compile(r"\s*\(note creator\)$")
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 _WS_RE = re.compile(r"\s+")
 
@@ -643,12 +648,33 @@ def _user_from_label(label: str) -> User:
     Returns:
         The parsed user.
     """
-    match = re.match(r"^(?P<name>.*?)\s*<(?P<email>[^>]+)>\s*$", label.strip())
+    match = _LABEL_RE.match(label.strip())
     if not match:
         return User(name=label.strip())
-    name = match.group("name").strip()
-    name = re.sub(r"\s*\(note creator\)$", "", name).strip()
+    name = _CREATOR_SUFFIX_RE.sub("", match.group("name").strip()).strip()
     return User(name=name, email=match.group("email").strip())
+
+
+def creator_email(element: str) -> str:
+    """The note creator's email from a verbatim ``<meeting>`` element.
+
+    ``_user_from_label`` deliberately drops the ``(note creator)`` marker when
+    building attendees, and ``build_note`` never sets ``Note.owner``, so a
+    parsed MCP note carries no ownership at all. The marker does survive in
+    the element ``build_raw`` archives verbatim, which makes this the only
+    per-note identity signal an MCP archive retains.
+
+    Args:
+        element: The verbatim ``<meeting>`` element text.
+
+    Returns:
+        The creator's email, or ``""`` when the element names none.
+    """
+    for label in _participants(element):
+        match = _LABEL_RE.match(label.strip())
+        if match and _CREATOR_SUFFIX_RE.search(match.group("name").strip()):
+            return match.group("email").strip()
+    return ""
 
 
 def build_raw(

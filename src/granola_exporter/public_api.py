@@ -12,6 +12,7 @@ requests/second, so requests pass through a token bucket sized to match, with
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
@@ -258,6 +259,33 @@ class PublicAPIClient:
             if cursor in seen:
                 raise GranolaAPIError("Pagination cursor repeated; aborting.")
             seen.add(cursor)
+
+    def account_email(self, sample: int = MAX_PAGE_SIZE) -> str:
+        """Identify the account this key belongs to.
+
+        The public API exposes no account endpoint -- ``/me``, ``/account``,
+        ``/user``, ``/users/me`` and ``/workspaces`` all 404 -- so identity is
+        inferred from who owns the notes the key can see. The most common
+        owner wins rather than the first: a workspace-visible meeting created
+        by a colleague would otherwise misidentify the account.
+
+        Args:
+            sample: How many recent notes to look at, capped at one page.
+
+        Returns:
+            The dominant owner email, or ``""`` when the key can see no notes.
+        """
+        page = self.list_notes_page(page_size=sample)
+        notes = page.get("notes")
+        if not isinstance(notes, list):
+            return ""
+
+        seen: Counter[str] = Counter()
+        for note in notes:
+            owner = note.get("owner") if isinstance(note, dict) else None
+            if isinstance(owner, dict) and owner.get("email"):
+                seen[str(owner["email"]).strip()] += 1
+        return seen.most_common(1)[0][0] if seen else ""
 
     def get_note(self, note_id: str, include_transcript: bool = True) -> dict[str, Any]:
         """Fetch a single note, optionally with its full transcript.

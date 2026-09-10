@@ -136,7 +136,7 @@ uv run granola-export sync --source mcp --since 2025-01-01
 | `doctor` | Validate credentials, backend reachability and archive location |
 | `login` | Authorize the Granola MCP in a browser (`--no-browser`) |
 | `logout` | Remove the stored MCP credentials (`--all`) |
-| `sync` | Fetch new and changed meetings (`--full`, `-v`, `--source`, `--since`, `--window`, `--refresh-batch`) |
+| `sync` | Fetch new and changed meetings (`--full`, `-v`, `--source`, `--since`, `--window`, `--refresh-batch`, `--allow-account-change`) |
 | `verify` | Check on-disk integrity, provenance and duplicates; reconcile upstream |
 
 Every command also takes `--profile NAME` — see
@@ -211,6 +211,46 @@ with a letter or digit; it is case-folded, and anything else is refused rather
 than silently rewritten. A named profile ignores `GRANOLA_MCP_TOKEN_FILE`,
 which names one exact file and so cannot also hold a family of them.
 
+**A profile brings its own API key.** `--profile work` reads
+`GRANOLA_API_KEY_WORK`, never `GRANOLA_API_KEY` — inheriting the default key is
+how a work sync ends up silently authenticated as your personal account. The
+variable is the profile name uppercased with `.` and `-` replaced by `_`. With
+no key set for the profile, `auto` resolves to the MCP:
+
+```bash
+uv run granola-export doctor --profile work
+#   sync source : mcp (auto: no GRANOLA_API_KEY_WORK)
+```
+
+### The archive knows whose it is
+
+A sync records the account it authorized as, and refuses to run if the archive
+already belongs to somebody else:
+
+```
+$ granola-export sync --profile work
+ERROR: archive/work holds meetings for work@company.com, but this run is
+authorized as personal@gmail.com.
+  Mixing two accounts in one archive cannot be undone.
+  Use --profile to give personal@gmail.com its own archive, or pass
+  --allow-account-change to re-claim this one.
+```
+
+Nothing is written when it refuses. `doctor` and `verify` report the same
+mismatch as a warning rather than failing, and `doctor` shows both the archive's
+account and the one you are authorized as. Pass `--allow-account-change` to
+re-claim the archive deliberately.
+
+Identity comes from `get_account_info` on the MCP. The public API exposes no
+account endpoint, so it is inferred from who owns the notes the key can see —
+the most common owner, so one workspace-visible meeting created by a colleague
+does not read as an account change.
+
+Archives written before this existed are still covered: the owner is recovered
+from the payloads already on disk. The one gap is an MCP archive whose stored
+elements name no note creator — there is nothing to recover from, so the next
+sync claims it.
+
 **Without a profile, nothing changes**: the credential stays at
 `mcp-oauth.json` and the archive stays at `archive/`. There is no profile
 called `default`, deliberately — minting one would rename the file you already
@@ -267,7 +307,8 @@ placed elsewhere with `GRANOLA_MCP_TOKEN_FILE`).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GRANOLA_API_KEY` | — | Public API key (`grn_…`). Needed for the public API backend. |
+| `GRANOLA_API_KEY` | — | Public API key (`grn_…`) for the default profile. Needed for the public API backend. |
+| `GRANOLA_API_KEY_<PROFILE>` | — | Public API key for a named profile, e.g. `GRANOLA_API_KEY_WORK`. A profile never falls back to `GRANOLA_API_KEY`. |
 | `GRANOLA_ARCHIVE_DIR` | `./archive` | Where the archive is written |
 | `GRANOLA_SYNC_SOURCE` | `auto` | `auto`, `public-api` or `mcp` |
 | `GRANOLA_MCP_URL` | `https://mcp.granola.ai/mcp` | MCP endpoint |

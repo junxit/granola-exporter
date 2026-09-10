@@ -50,6 +50,29 @@ class Config:
     profile: str = ""
 
 
+def api_key_var(profile: str) -> str:
+    """The environment variable holding a profile's public API key.
+
+    A profile scopes the MCP credential and the archive, so it must scope the
+    API key too -- otherwise ``--profile work`` silently authenticates as
+    whoever ``GRANOLA_API_KEY`` belongs to and writes their meetings into the
+    work archive. There is deliberately **no fallback** to ``GRANOLA_API_KEY``
+    for a named profile: inheriting the default key is the bug.
+
+    Args:
+        profile: A normalized profile name, or ``""`` for the default.
+
+    Returns:
+        The variable name to read.
+    """
+    if not profile:
+        return "GRANOLA_API_KEY"
+    # Profile names admit only [a-z0-9._-], so this mapping is total and
+    # cannot collide: "." and "-" are the only characters needing translation.
+    suffix = profile.upper().replace(".", "_").replace("-", "_")
+    return f"GRANOLA_API_KEY_{suffix}"
+
+
 def _config(requested: str | None = None, profile: str | None = None) -> Config:
     """Load configuration from the environment and ``.env``.
 
@@ -89,7 +112,7 @@ def _config(requested: str | None = None, profile: str | None = None) -> Config:
 
     archive_dir = Path(os.environ.get("GRANOLA_ARCHIVE_DIR", DEFAULT_ARCHIVE).strip())
     return Config(
-        api_key=os.environ.get("GRANOLA_API_KEY", "").strip(),
+        api_key=os.environ.get(api_key_var(name), "").strip(),
         archive_dir=(archive_dir / name if name else archive_dir)
         .expanduser()
         .resolve(),
@@ -115,6 +138,63 @@ def _effective_source(config: Config) -> str:
     if config.source in {"public-api", "mcp"}:
         return config.source
     return "public-api" if config.api_key else "mcp"
+
+
+class AccountMismatch(RuntimeError):
+    """Raised when a sync would write a different account into an archive."""
+
+
+def _check_account(
+    archive: Archive,
+    current: str,
+    config: Config,
+    *,
+    allow_change: bool,
+) -> str:
+    """Compare the syncing account against the one the archive already holds.
+
+    Two people's meetings in one archive cannot be untangled afterwards: the
+    ``upstream_missing`` sweep scopes by backend rather than by account, so
+    each full sync would flag the other account's notes as gone from upstream,
+    and there is no per-note owner in the index to sort them out by. Refusing
+    up front is the only cheap moment.
+
+    Claims the archive as a side effect when the check passes, so the next run
+    takes the recorded fast path instead of re-inferring.
+
+    Args:
+        archive: The archive about to be written.
+        current: The email of the account being synced, ``""`` if unknown.
+        config: The loaded configuration.
+        allow_change: Whether to re-claim the archive instead of refusing.
+
+    Returns:
+        A warning line for the caller to print, or ``""``.
+
+    Raises:
+        AccountMismatch: If the accounts differ and ``allow_change`` is unset.
+    """
+    if not current:
+        # A sync that cannot identify itself is about to fail anyway; blocking
+        # here would turn a transient API hiccup into a refusal to back up.
+        return "could not identify the syncing account — skipping the check"
+
+    incumbent = archive.account_email or archive.infer_account_email()
+    if not incumbent or incumbent == current:
+        archive.claim_account(current, _effective_source(config))
+        return ""
+
+    if not allow_change:
+        raise AccountMismatch(
+            f"{archive.root} holds meetings for {incumbent}, but this run is "
+            f"authorized as {current}.\n"
+            f"  Mixing two accounts in one archive cannot be undone.\n"
+            f"  Use --profile to give {current} its own archive, or pass "
+            f"--allow-account-change to re-claim this one."
+        )
+
+    archive.claim_account(current, _effective_source(config))
+    return f"archive re-claimed: {incumbent} -> {current}"
 
 
 def _token_path(config: Config) -> Path:
@@ -200,18 +280,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     others = [name for name in known_profiles() if name != config.profile]
     if others:
         print(f"  profiles    : {', '.join(others)}")
+    key_var = api_key_var(config.profile)
     reason = "" if config.source != SOURCE_AUTO else (
-        " (auto: GRANOLA_API_KEY set)"
-        if config.api_key
-        else " (auto: no GRANOLA_API_KEY)"
+        f" (auto: {key_var} set)" if config.api_key else f" (auto: no {key_var})"
     )
     print(f"  sync source : {effective}{reason}")
 
     failed = False
     if effective == "public-api":
-        failed = _doctor_public_api(config) or failed
+        failed, live_email = _doctor_public_api(config)
     else:
-        failed = _doctor_mcp(config) or failed
+        failed, live_email = _doctor_mcp(config)
 
     by_source: dict[str, int] = {}
     for note_id in index:
@@ -220,6 +299,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         )
     breakdown = ", ".join(f"{n} {s}" for s, n in sorted(by_source.items())) or "none"
     print(f"  archived    : {len(index)} notes ({breakdown})")
+    # A warning, never a failure: a diagnostic that refuses to run is not a
+    # diagnostic. `sync` is where this becomes a hard stop.
+    incumbent = archive.account_email or archive.infer_account_email()
+    print(f"  account     : {incumbent or '(unclaimed)'}")
+    if incumbent and live_email and incumbent != live_email:
+        print(
+            f"  WARNING     : archive holds {incumbent} but you are authorized "
+            f"as {live_email} — sync will refuse without --allow-account-change"
+        )
     print(f"  watermark   : {archive.watermark or '(none — next sync is a backfill)'}")
 
     mcp_state = archive.source_state(SOURCE_MCP)
@@ -237,25 +325,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _doctor_public_api(config: Config) -> bool:
+def _doctor_public_api(config: Config) -> tuple[bool, str]:
     """Check the public API key and reachability.
 
     Args:
         config: The loaded configuration.
 
     Returns:
-        ``True`` if something failed.
+        Whether something failed, and the account email the key belongs to
+        (``""`` when it could not be determined).
     """
     if not config.api_key:
         print("  api key     : MISSING")
         print()
-        print("Set GRANOLA_API_KEY in .env — copy .env.example to .env first.")
+        print(
+            f"Set {api_key_var(config.profile)} in .env — "
+            "copy .env.example to .env first."
+        )
         print(
             "Create a key at: Granola -> Settings -> Connectors -> "
             "Personal API Keys (Business or Enterprise plan)."
         )
         print("No key? The MCP backend works on every plan: granola-export login")
-        return True
+        return True, ""
 
     masked = (
         f"{config.api_key[:8]}...{config.api_key[-4:]}"
@@ -279,20 +371,23 @@ def _doctor_public_api(config: Config) -> bool:
             if notes:
                 stub = notes[0]
                 print(f"  sample note : {stub.get('id')} — {stub.get('title')!r}")
+            email = client.account_email()
+            print(f"  api account : {email or '(no notes to identify from)'}")
     except GranolaAPIError as exc:
         print(f"  ERROR       : {exc}")
-        return True
-    return False
+        return True, ""
+    return False, email
 
 
-def _doctor_mcp(config: Config) -> bool:
+def _doctor_mcp(config: Config) -> tuple[bool, str]:
     """Check MCP credentials and, when authorized, reachability.
 
     Args:
         config: The loaded configuration.
 
     Returns:
-        ``True`` if something failed.
+        Whether something failed, and the authorized account's email (``""``
+        when it could not be determined).
     """
     from .mcp_api import EXPECTED_TOOLS, MCPClient, MCPError
     from .mcp_auth import MCPAuthError
@@ -303,8 +398,9 @@ def _doctor_mcp(config: Config) -> bool:
     print(f"  token file  : {status.path}")
     print(f"  mcp auth    : {status.describe()}")
     if not status.present:
-        return True
+        return True, ""
 
+    email = ""
     try:
         with MCPClient(
             config.mcp_url, token_path=_token_path(config), allow_login=False
@@ -315,6 +411,7 @@ def _doctor_mcp(config: Config) -> bool:
             if missing:
                 print(f"  WARNING     : expected tools absent: {sorted(missing)}")
             account = client.account_info()
+            email = str(account.get("email") or "")
             print(f"  mcp account : {account.get('email', '?')}")
             workspace = account.get("active_workspace") or {}
             if workspace:
@@ -326,8 +423,8 @@ def _doctor_mcp(config: Config) -> bool:
             print(f"  mcp folders : OK ({len(folders)} folders)")
     except (MCPAuthError, MCPError) as exc:
         print(f"  ERROR       : {exc}")
-        return True
-    return False
+        return True, email
+    return False, email
 
 
 # -- login / logout --------------------------------------------------------
@@ -433,18 +530,29 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if args.window is not None:
         opts.window_days = args.window
 
+    allow_change = bool(getattr(args, "allow_account_change", False))
     try:
         if effective == "public-api":
             if not config.api_key:
                 print(
-                    "No GRANOLA_API_KEY. Run 'granola-export doctor' for setup help.",
+                    f"No {api_key_var(config.profile)}. "
+                    "Run 'granola-export doctor' for setup help.",
                     file=sys.stderr,
                 )
                 return 1
             with PublicAPIClient(config.api_key) as client:
+                # Before sync_public_api, which writes on its first note.
+                note = _check_account(
+                    archive, client.account_email(), config, allow_change=allow_change
+                )
+                if note:
+                    print(f"  NOTE: {note}", file=sys.stderr)
                 counts = sync_public_api(archive, client, opts)
         else:
-            counts = _sync_via_mcp(archive, config, opts)
+            counts = _sync_via_mcp(archive, config, opts, allow_change=allow_change)
+    except AccountMismatch as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     except GranolaAPIError as exc:
         # The sync functions save the index before re-raising.
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -460,13 +568,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 1 if counts.failed else 0
 
 
-def _sync_via_mcp(archive: Archive, config: Config, opts: SyncOptions):
+def _sync_via_mcp(
+    archive: Archive,
+    config: Config,
+    opts: SyncOptions,
+    *,
+    allow_change: bool = False,
+):
     """Run a sync through the MCP backend.
 
     Args:
         archive: The destination archive.
         config: The loaded configuration.
         opts: Per-run options.
+        allow_change: Whether a different account may re-claim the archive.
 
     Returns:
         The per-note tally.
@@ -484,6 +599,15 @@ def _sync_via_mcp(archive: Archive, config: Config, opts: SyncOptions):
         with MCPClient(
             config.mcp_url, token_path=_token_path(config), allow_login=False
         ) as client:
+            # The client is connected but nothing has been listed or written.
+            note = _check_account(
+                archive,
+                str(client.account_info().get("email") or ""),
+                config,
+                allow_change=allow_change,
+            )
+            if note:
+                print(f"  NOTE: {note}", file=sys.stderr)
             return sync_mcp(archive, client, opts, server_url=config.mcp_url)
     except MCPAuthError as exc:
         archive.save_index()
@@ -511,6 +635,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     print(f"Verifying {config.archive_dir}")
     print(f"  indexed notes      : {len(index)}")
+    print(f"  account            : {archive.account_email or '(unclaimed)'}")
 
     missing_dirs = []
     missing_raw = []
@@ -728,6 +853,12 @@ def main(argv: list[str] | None = None) -> int:
         "--full",
         action="store_true",
         help="ignore the watermark and re-check every note",
+    )
+    sync.add_argument(
+        "--allow-account-change",
+        action="store_true",
+        help="let a different Granola account write into this archive, "
+        "re-claiming it (two accounts in one archive cannot be untangled)",
     )
     sync.add_argument(
         "--since",

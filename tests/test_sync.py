@@ -182,3 +182,27 @@ def test_full_run_flags_notes_missing_upstream(tmp_path, note_payload, stub_payl
 
     assert archive2.load_index()[note_payload["id"]]["upstream_missing"] is True
     assert entry_path.is_dir(), "the archive must never delete a note"
+
+
+# -- account identity -------------------------------------------------------
+
+
+def test_account_email_reports_the_dominant_owner(stub_payload):
+    """The public API exposes no account endpoint, so ownership stands in."""
+    colleague = dict(stub_payload, id="not_colleagueAAAAA")
+    colleague["owner"] = {"name": "Milk Jones", "email": "milk@granola.ai"}
+    page = {"notes": [stub_payload, stub_payload, colleague], "hasMore": False}
+
+    def handler(request):
+        return httpx.Response(200, json=page)
+
+    assert _client(handler).account_email() == "oat@granola.ai"
+
+
+def test_account_email_is_empty_without_notes():
+    """A key that can see nothing identifies nobody, and must not guess."""
+
+    def handler(request):
+        return httpx.Response(200, json={"notes": [], "hasMore": False})
+
+    assert _client(handler).account_email() == ""

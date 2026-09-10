@@ -1,6 +1,39 @@
 Changelog
 =========
 
+0.5.0
+-----
+- A profile no longer inherits the default API key. --profile work reads
+  GRANOLA_API_KEY_WORK and never falls back to GRANOLA_API_KEY. Profiles
+  scoped the MCP credential and the archive but not the key, so a profile
+  whose account only has MCP access would see GRANOLA_API_KEY, select the
+  public API, authenticate as whoever that key belongs to, and write their
+  meetings into the profile's archive. With no key set for the profile, auto
+  now correctly resolves to the MCP.
+- An archive records which Granola account it holds, and a sync refuses to
+  write a different one into it. Two people's meetings in one archive cannot
+  be untangled afterwards: the upstream_missing sweep scopes by backend rather
+  than by account, and the index records no per-note owner. The check runs
+  before the first fetch, so a refused sync leaves the archive byte-identical.
+- --allow-account-change re-claims an archive deliberately. Named for exactly
+  what it permits rather than --force, because it cannot be undone.
+- doctor and verify report a mismatch as a warning and still exit 0. A
+  diagnostic that refuses to run is not a diagnostic; sync is where this is a
+  hard stop. doctor now also prints the archive's account and the account you
+  are authorized as.
+- Identity is get_account_info on the MCP. The public API has no account
+  endpoint -- /me, /account, /user, /users/me and /workspaces all 404 -- so it
+  is inferred from note ownership, taking the most common owner so that one
+  workspace-visible meeting created by a colleague does not read as an account
+  change.
+- Archives written before this release are covered too: the owner is recovered
+  from payloads already on disk, so an upgrade does not have to trust the next
+  sync to be the right account. Public API notes carry owner.email verbatim;
+  MCP notes have no owner field at all, but the "(note creator)" marker
+  survives in the element build_raw archives, so mcp_parse.creator_email reads
+  it back. An MCP archive whose elements name no creator stays unclaimed until
+  the next sync.
+
 0.4.0
 -----
 - Added --profile NAME to every command, so a second Granola account no longer

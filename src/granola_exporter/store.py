@@ -24,6 +24,7 @@ import hashlib
 import json
 import re
 import shutil
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,10 @@ TRANSCRIPT_NAME = "transcript.md"
 MAX_SLUG_LEN = 60
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
+# How many recently archived notes infer_account_email reads. Enough for one
+# colleague's meeting not to outvote the owner, small enough to stay free.
+ACCOUNT_SAMPLE = 25
+
 
 class UnsafeArchivePathError(ValueError):
     """Raised when a computed path would fall outside the archive root.
@@ -96,6 +101,33 @@ def _resolve_within(root: Path, *parts: str) -> Path:
             f"path escapes the archive root: {'/'.join(parts)!r}"
         )
     return candidate
+
+
+def _owner_email(raw: dict[str, Any]) -> str:
+    """Read the owning account's email out of an archived payload.
+
+    Args:
+        raw: A decoded ``raw.json``, from either backend.
+
+    Returns:
+        The email, or ``""`` when the payload records none.
+    """
+    owner = raw.get("owner")
+    if isinstance(owner, dict) and owner.get("email"):
+        return str(owner["email"]).strip()
+
+    mcp = raw.get("mcp")
+    if not isinstance(mcp, dict):
+        return ""
+    # Imported lazily: the public API path has no reason to pay for the MCP
+    # parser, matching how the rest of the codebase defers that import.
+    from .mcp_parse import creator_email
+
+    for key in ("get_meetings_element", "list_meetings_element"):
+        element = mcp.get(key)
+        if isinstance(element, str) and (email := creator_email(element)):
+            return email
+    return ""
 
 
 def slugify(title: str) -> str:
@@ -268,6 +300,80 @@ class Archive:
         if not value:
             value = self.load_state().get("updated_after")
         return str(value) if value else None
+
+    # -- account identity --------------------------------------------------
+
+    @property
+    def account_email(self) -> str:
+        """The Granola account this archive belongs to.
+
+        Returns:
+            The recorded email, or ``""`` for an archive that has never been
+            claimed -- either because it is empty or because it predates this
+            key.
+        """
+        account = self.load_state().get("account")
+        if not isinstance(account, dict):
+            return ""
+        return str(account.get("email") or "")
+
+    def claim_account(self, email: str, source: str) -> None:
+        """Record which account this archive holds.
+
+        Args:
+            email: The account's email address.
+            source: The backend the identity was learned from.
+        """
+        if not email:
+            return
+        account = self.load_state().get("account")
+        first_seen = (
+            account.get("first_seen")
+            if isinstance(account, dict) and account.get("email") == email
+            else None
+        )
+        self.save_state(
+            account={
+                "email": email,
+                "source": source,
+                "first_seen": first_seen or datetime.now().astimezone().isoformat(),
+            }
+        )
+
+    def infer_account_email(self, sample: int = ACCOUNT_SAMPLE) -> str:
+        """Work out whose meetings an unclaimed archive already holds.
+
+        Archives written before the account key existed still carry the answer
+        in their payloads, so an upgrade does not have to trust the next sync
+        to be the right account. The most common email wins rather than the
+        first found: a workspace-visible meeting created by a colleague would
+        otherwise read as an account change.
+
+        Args:
+            sample: How many of the most recently archived notes to read.
+
+        Returns:
+            The dominant email, or ``""`` when the archive holds none -- an
+            MCP archive whose elements carry no creator marker, for instance.
+        """
+        entries = sorted(
+            self.load_index().values(),
+            key=lambda e: str(e.get("archived_at") or ""),
+            reverse=True,
+        )[:sample]
+
+        seen: Counter[str] = Counter()
+        for entry in entries:
+            try:
+                path = _resolve_within(self.root, str(entry.get("path", "")), RAW_NAME)
+            except UnsafeArchivePathError:
+                continue
+            raw = _read_json(path, default=None)
+            if isinstance(raw, dict):
+                email = _owner_email(raw)
+                if email:
+                    seen[email] += 1
+        return seen.most_common(1)[0][0] if seen else ""
 
     # -- paths -------------------------------------------------------------
 

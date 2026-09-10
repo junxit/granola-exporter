@@ -265,3 +265,95 @@ def test_legacy_flat_state_still_yields_a_watermark(tmp_path):
         '{"updated_after": "2026-07-29T01:53:06.032Z"}', encoding="utf-8"
     )
     assert Archive(tmp_path).watermark == "2026-07-29T01:53:06.032Z"
+
+
+# -- account identity -------------------------------------------------------
+
+
+def test_claim_account_round_trips(tmp_path):
+    """The archive records whose meetings it holds."""
+    archive = Archive(tmp_path)
+    assert archive.account_email == ""
+
+    archive.claim_account("oat@granola.ai", SOURCE_PUBLIC_API)
+    reopened = Archive(tmp_path)
+    assert reopened.account_email == "oat@granola.ai"
+    account = reopened.load_state()["account"]
+    assert account["source"] == SOURCE_PUBLIC_API
+    assert account["first_seen"]
+
+
+def test_claim_account_keeps_first_seen_for_the_same_account(tmp_path):
+    """Re-claiming for the same account must not reset when it was claimed."""
+    archive = Archive(tmp_path)
+    archive.claim_account("oat@granola.ai", SOURCE_PUBLIC_API)
+    first = archive.load_state()["account"]["first_seen"]
+
+    archive.claim_account("oat@granola.ai", SOURCE_MCP)
+    assert archive.load_state()["account"]["first_seen"] == first
+
+    archive.claim_account("milk@granola.ai", SOURCE_MCP)
+    assert archive.load_state()["account"]["first_seen"] != first, (
+        "a genuinely different account starts its own history"
+    )
+
+
+def test_claim_account_ignores_an_empty_email(tmp_path):
+    """An unidentifiable sync must not claim the archive as nobody."""
+    archive = Archive(tmp_path)
+    archive.claim_account("", SOURCE_PUBLIC_API)
+    assert archive.account_email == ""
+    assert "account" not in archive.load_state()
+
+
+def test_infer_account_email_from_a_public_api_archive(tmp_path, note_payload):
+    """An archive predating the account key still knows whose it is.
+
+    Otherwise every upgrade would have to trust the next sync to be the right
+    account, which is exactly the mistake the guard exists to catch.
+    """
+    archive = Archive(tmp_path)
+    _write(archive, note_payload)
+    assert archive.infer_account_email() == "oat@granola.ai"
+
+
+def test_infer_account_email_is_empty_for_an_empty_archive(tmp_path):
+    """Nothing archived means nothing to infer, and that is not an error."""
+    assert Archive(tmp_path).infer_account_email() == ""
+
+
+def test_infer_account_email_takes_the_most_common_owner(tmp_path, note_payload):
+    """A colleague's workspace meeting must not read as an account change."""
+    archive = Archive(tmp_path)
+    for index in range(3):
+        _write(archive, dict(note_payload, id=f"not_owner{index}AAAAAAAA"))
+    _write(
+        archive,
+        dict(
+            note_payload,
+            id="not_colleagueAAAAA",
+            owner={"name": "Milk Jones", "email": "milk@granola.ai"},
+        ),
+    )
+
+    assert archive.infer_account_email() == "oat@granola.ai"
+
+
+def test_infer_account_email_reads_the_mcp_creator_marker(tmp_path, mcp_detail_text):
+    """MCP notes carry no owner, but the archived element names the creator.
+
+    ``build_note`` never sets ``Note.owner`` and ``_user_from_label`` strips
+    the ``(note creator)`` suffix, so the verbatim element is the only place
+    an MCP archive records who owns a meeting.
+    """
+    from granola_exporter.mcp_parse import build_raw, parse_meetings_detail
+
+    archive = Archive(tmp_path)
+    _envelope, meetings = parse_meetings_detail(mcp_detail_text)
+    raw = build_raw(meetings[0], "<meeting/>", None, [], "https://mcp.granola.ai/mcp")
+
+    note = Note(id=f"mcp_{meetings[0].meeting_id}", title="x", source=SOURCE_MCP)
+    note.raw = raw
+    archive.write_note(note, "# x\n", "", source=SOURCE_MCP)
+
+    assert archive.infer_account_email() == "oat@granola.ai"
