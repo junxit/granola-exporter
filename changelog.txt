@@ -12,6 +12,14 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- logout --all now removes the default credentials even when
+  GRANOLA_MCP_PROFILE is set, as the README suggests doing per Terminal tab.
+  The default slot was resolved through that variable, so it became the
+  named profile, the default mcp-oauth.json survived, and the command still
+  reported success; a malformed value stopped the sweep altogether. The help
+  and README also said --all cannot reach a GRANOLA_MCP_TOKEN_FILE file; it
+  removes the one the variable names now, and only a file an earlier session
+  pointed elsewhere is out of reach.
 - MCP notes can now be flagged upstream_missing, so the retention guarantee
   holds for them too; sync_mcp never swept, so a meeting deleted upstream
   looked current forever. Only an unbounded sync --full with no truncated

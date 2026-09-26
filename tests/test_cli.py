@@ -202,6 +202,47 @@ def test_logout_all_removes_every_profile(monkeypatch, tmp_path, capsys):
     assert "No stored MCP credentials" in capsys.readouterr().out
 
 
+def test_logout_all_removes_the_default_even_with_a_profile_set(monkeypatch, tmp_path):
+    """Regression: the default slot resolved through GRANOLA_MCP_PROFILE.
+
+    With the variable set -- as the README suggests, per Terminal tab -- the
+    "default" target became that profile, so the default credential survived
+    `logout --all` while the command reported success.
+    """
+    monkeypatch.setenv("GRANOLA_MCP_PROFILE", "work")
+    base = tmp_path / "state/granola-exporter"
+    base.mkdir(parents=True)
+    (base / "mcp-oauth-work.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "token.json").write_text("{}", encoding="utf-8")
+
+    assert main(["logout", "--all"]) == 0
+
+    assert not (tmp_path / "token.json").exists(), "the default credential survived"
+    assert not (base / "mcp-oauth-work.json").exists()
+
+
+def test_logout_all_removes_the_default_state_file(monkeypatch, tmp_path):
+    """Without GRANOLA_MCP_TOKEN_FILE the default lives in the state directory."""
+    monkeypatch.delenv("GRANOLA_MCP_TOKEN_FILE")
+    base = tmp_path / "state/granola-exporter"
+    base.mkdir(parents=True)
+    for name in ("mcp-oauth.json", "mcp-oauth-work.json"):
+        (base / name).write_text("{}", encoding="utf-8")
+
+    assert main(["logout", "--all"]) == 0
+
+    assert list(base.iterdir()) == []
+
+
+def test_logout_all_ignores_a_malformed_profile_variable(monkeypatch, tmp_path):
+    """--all never uses the variable, so a bad value must not stop the sweep."""
+    monkeypatch.setenv("GRANOLA_MCP_PROFILE", "../bad")
+    (tmp_path / "token.json").write_text("{}", encoding="utf-8")
+
+    assert main(["logout", "--all"]) == 0
+    assert not (tmp_path / "token.json").exists()
+
+
 def test_logout_all_rejects_a_named_profile():
     """--all and --profile are contradictory; neither is silently ignored."""
     with pytest.raises(SystemExit, match="--all removes every profile"):
