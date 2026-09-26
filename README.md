@@ -409,8 +409,12 @@ API key, use it — this backend exists for accounts that cannot get one.
 - **No owner, calendar event, or `web_url`.** `web_url` is synthesised from the
   meeting UUID, which is safe because the id equivalence below is verified.
 - **Folder membership costs extra.** Neither `list_meetings` nor `get_meetings`
-  returns it, so it takes one listing per folder. Only folder *names* cross the
-  boundary: MCP folder ids are UUIDs in a different namespace from `fol_*`.
+  returns it, so it takes one listing per folder. A plain `sync` lists each
+  folder over the trailing window, so a new note is filed at once; `sync --full`
+  lists every folder across the whole history and re-reads any note whose
+  folders changed, including one moved out of every folder. Only folder
+  *names* cross the boundary: MCP folder ids are UUIDs in a different namespace
+  from `fol_*`.
 - **Responses are prose, not a contract.** They are shaped for a language model,
   wrapped in a prompt-injection preamble, and can be reworded without notice.
   The parser fails **loudly** on drift rather than returning an empty window —
