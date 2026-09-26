@@ -293,6 +293,16 @@ def sync_public_api(
             note = Note.from_api(payload)
             if not note.id:
                 note.id = note_id
+            elif note.id != note_id:
+                # The id builds the archive path. An answer about some other
+                # note must not be filed under its key, and a malformed one
+                # must not abort the run in the path check.
+                counts.failed += 1
+                print(
+                    f"  FAIL  {note_id} — the API answered with {note.id!r}",
+                    file=sys.stderr,
+                )
+                continue
 
             if archive.is_unchanged(note.id, content_hash(note.raw)):
                 counts.unchanged += 1
