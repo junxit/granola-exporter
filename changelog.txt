@@ -12,6 +12,10 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- A public API detail payload whose id differs from the one requested is
+  counted as failed rather than archived. The id builds the archive path: a
+  malformed one raised UnsafeArchivePathError and aborted the whole run, and
+  a well-formed but different one filed the note under another note's key.
 - The OAuth redirect listener now serves exactly one request on /callback,
   as SECURITY.md says. A second request -- a reload, or another page on this
   machine -- overwrote the captured code; the SDK's state and PKCE checks

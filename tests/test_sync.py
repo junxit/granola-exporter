@@ -107,6 +107,23 @@ def test_malformed_id_is_skipped_not_archived(tmp_path, note_payload):
     assert archive.load_index() == {}
 
 
+@pytest.mark.parametrize("answered", ["../../../../etc/passwd", "not_2d3tmYTlCICgjy"])
+def test_a_detail_payload_for_another_note_is_not_archived(
+    tmp_path, note_payload, stub_payload, answered
+):
+    """The detail's id builds the path, so it must be the note asked for.
+
+    Regression: a malformed id in the detail payload raised
+    UnsafeArchivePathError and aborted the whole run, and a well-formed but
+    different one filed this note's content under another note's key.
+    """
+    wrong = dict(note_payload, id=answered)
+    counts = sync_public_api(Archive(tmp_path), _client(_handler(stub_payload, wrong, [])))
+
+    assert (counts.failed, counts.new) == (1, 0)
+    assert Archive(tmp_path).load_index() == {}
+
+
 def test_note_still_processing_is_skipped_not_failed(
     tmp_path, note_payload, stub_payload
 ):
