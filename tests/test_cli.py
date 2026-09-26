@@ -271,6 +271,44 @@ def test_doctor_lists_other_profiles_only_when_they_exist(tmp_path, capsys):
     assert "profiles    : work" in capsys.readouterr().out
 
 
+# -- version -------------------------------------------------------------------
+
+
+def _pyproject_version() -> str:
+    """Read the version pyproject.toml declares.
+
+    Returns:
+        The ``[project] version`` string.
+    """
+    import tomllib
+
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    return tomllib.loads(text)["project"]["version"]
+
+
+def test_version_matches_pyproject():
+    """Regression: __init__ sat at 0.3.0 through two releases.
+
+    Both backends send it as the User-Agent, so every request since 0.4.0
+    announced the wrong version.
+    """
+    import granola_exporter
+
+    version = _pyproject_version()
+    assert granola_exporter.__version__ == version
+    assert granola_exporter.USER_AGENT == f"granola-exporter/{version}"
+
+
+def test_version_flag_prints_the_version(capsys):
+    """Which build is running should never take reading the source."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    assert _pyproject_version() in capsys.readouterr().out
+
+
 # -- argument parsing ------------------------------------------------------
 
 
