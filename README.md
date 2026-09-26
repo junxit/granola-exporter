@@ -370,6 +370,12 @@ API key, use it — this backend exists for accounts that cannot get one.
   by month until six consecutive months come back empty, and takes that as the
   start of your history. If yours has a longer gap, pass `--since` to reach
   past it.
+- **A failed fetch is retried by the next `sync`.** If a batch of meeting
+  details fails, the run exits 1 and records how far back the failure was. The
+  next `sync` lists back that far and retries each failed meeting in a call of
+  its own, so one that always fails cannot hold the rest hostage. A meeting
+  that keeps failing keeps the exit code at 1 until it lands or disappears
+  upstream — the same as the public API, which holds its watermark instead.
 - **Transcripts lose their structure.** The MCP returns one flat string with
   inline `Me:`/`Them:`/`Name:` labels and no timing at all. It is split back
   into speaker turns heuristically, and `transcript.md` carries

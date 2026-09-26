@@ -388,6 +388,77 @@ def test_backfill_windows_ignore_the_window_flag(tmp_path):
     assert counts.new == 2
 
 
+class FailsBatchesWith(FakeMCP):
+    """A fake whose get_meetings fails for any batch holding certain ids."""
+
+    def __init__(self, meetings, *, bad: set[str], failures: int | None = None) -> None:
+        """Initialize the fake.
+
+        Args:
+            meetings: ``(uuid, title, date)`` triples.
+            bad: Ids whose presence makes a batch fail.
+            failures: How many times to fail before recovering; ``None``
+                fails forever.
+        """
+        super().__init__(meetings)
+        self.bad = bad
+        self.failures = failures
+
+    def get_meetings(self, meeting_ids):
+        """Fail a batch that holds a bad id, until the failures run out."""
+        if self.bad & set(meeting_ids) and self.failures != 0:
+            if self.failures is not None:
+                self.failures -= 1
+            self.calls.append(("get_meetings", tuple(meeting_ids)))
+            raise RuntimeError("get_meetings failed")
+        return super().get_meetings(meeting_ids)
+
+
+def test_failed_batch_is_retried_by_the_next_plain_sync(tmp_path):
+    """Regression: a failure outside the trailing window used to be lost.
+
+    The pass recorded scanned_through anyway, so the next run was
+    incremental, never listed that meeting again, and exited 0 while the
+    archive stayed short. The public API holds its watermark instead; this
+    is the MCP's equivalent.
+    """
+    fake = FailsBatchesWith(
+        [(_uuid(1), "Old meeting", date(2026, 1, 15))], bad={_uuid(1)}, failures=1
+    )
+    opts = SyncOptions(since=date(2026, 1, 1))
+
+    first = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert first.failed == 1
+    assert any("could not be fetched" in w for w in first.warnings())
+
+    second = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert second.new == 1, "the next plain sync must retry the failure"
+
+    fake.calls.clear()
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert fake.count("list_meetings") == 1, "once it lands, only the window is listed"
+    assert Archive(tmp_path).source_state(SOURCE_MCP)["retry_from"] is None
+
+
+def test_a_meeting_that_always_fails_cannot_hold_others_hostage(tmp_path):
+    """Retries go one per call, so a poison id fails alone."""
+    fake = FailsBatchesWith(
+        [
+            (_uuid(1), "Good", date(2026, 1, 15)),
+            (_uuid(2), "Always fails", date(2026, 1, 16)),
+        ],
+        bad={_uuid(2)},
+    )
+    opts = SyncOptions(since=date(2026, 1, 1))
+
+    first = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert first.failed == 2, "one batch, so the good meeting failed with it"
+
+    second = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert (second.new, second.failed) == (1, 1)
+    assert f"mcp_{_uuid(1)}" in Archive(tmp_path).load_index()
+
+
 def test_parse_drift_aborts_the_run(tmp_path):
     """An unparseable listing must never look like an empty window."""
 
