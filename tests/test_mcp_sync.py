@@ -354,6 +354,40 @@ def test_suspicious_window_is_bisected(tmp_path):
     assert len(windows) > 3, "the oversized window must have been subdivided"
 
 
+def test_backfill_survives_a_long_gap(tmp_path):
+    """A few quiet months must not end an unbounded backfill.
+
+    Discovery walks back until a run of empty windows says the history is
+    dry. Two empty 31-day windows used to be enough, so a two-month lull --
+    a long leave, say -- silently cut off everything older than it.
+    """
+    recent = TODAY - timedelta(days=10)
+    older = TODAY - timedelta(days=150)
+    fake = FakeMCP([(_uuid(1), "Recent", recent), (_uuid(2), "Before the gap", older)])
+
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    assert counts.new == 2, "the meeting before the gap was never reached"
+
+
+def test_backfill_windows_ignore_the_window_flag(tmp_path):
+    """--window sizes the trailing rescan, not the backfill's windows.
+
+    It used to set both, so a small --window made two short empty windows
+    enough to end a backfill at the first quiet fortnight.
+    """
+    fake = FakeMCP(
+        [
+            (_uuid(1), "Recent", TODAY - timedelta(days=2)),
+            (_uuid(2), "Four weeks back", TODAY - timedelta(days=30)),
+        ]
+    )
+
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(window_days=7), today=TODAY)
+
+    assert counts.new == 2
+
+
 def test_parse_drift_aborts_the_run(tmp_path):
     """An unparseable listing must never look like an empty window."""
 
