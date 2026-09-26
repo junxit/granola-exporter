@@ -1,6 +1,14 @@
 Changelog
 =========
 
+0.6.0
+-----
+- Fixed CLI tests that leaked fake-client state into each other. They
+  assigned _FakeMCPClient.folders and .listing directly, so a value outlived
+  the test that set it: test_allow_account_change_reclaims never set a
+  listing, passed only because an earlier test had left a valid one behind,
+  and failed when run on its own. Every CLI test now passes in isolation.
+
 0.5.0
 -----
 - A profile no longer inherits the default API key. --profile work reads
