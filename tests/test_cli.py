@@ -366,7 +366,9 @@ def test_verify_deep_defaults_to_off(capsys, tmp_path, monkeypatch):
     import granola_exporter.mcp_api as api
 
     _authorize(tmp_path, monkeypatch)
-    _FakeMCPClient.folders = [{"title": "Projects", "note_count": 3}]
+    monkeypatch.setattr(
+        _FakeMCPClient, "folders", [{"title": "Projects", "note_count": 3}]
+    )
     monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
 
     assert main(["verify", "--source", "mcp"]) == 0
@@ -381,10 +383,14 @@ def test_verify_flags_a_folder_count_mismatch(capsys, tmp_path, monkeypatch):
     import granola_exporter.mcp_api as api
 
     _authorize(tmp_path, monkeypatch)
-    _FakeMCPClient.folders = [
-        {"title": "Career", "note_count": 56},
-        {"title": "Church", "note_count": 0},
-    ]
+    monkeypatch.setattr(
+        _FakeMCPClient,
+        "folders",
+        [
+            {"title": "Career", "note_count": 56},
+            {"title": "Church", "note_count": 0},
+        ],
+    )
     monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
 
     main(["verify", "--source", "mcp"])
@@ -404,10 +410,11 @@ def test_verify_deep_reports_no_gap_on_an_empty_archive(capsys, tmp_path, monkey
     import granola_exporter.mcp_api as api
 
     _authorize(tmp_path, monkeypatch)
-    _FakeMCPClient.folders = []
-    _FakeMCPClient.listing = (
-        "preamble\n\n"
-        '<meetings_data from="x" to="y" count="0"></meetings_data>'
+    monkeypatch.setattr(_FakeMCPClient, "folders", [])
+    monkeypatch.setattr(
+        _FakeMCPClient,
+        "listing",
+        "preamble\n\n" '<meetings_data from="x" to="y" count="0"></meetings_data>',
     )
     monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
 
@@ -515,6 +522,7 @@ def test_allow_account_change_reclaims(tmp_path, monkeypatch, capsys):
     _authorize(tmp_path, monkeypatch)
     monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
     monkeypatch.setattr(_FakeMCPClient, "email", "personal@gmail.com")
+    monkeypatch.setattr(_FakeMCPClient, "listing", _EMPTY_LISTING)
 
     main(["sync", "--source", "mcp", "--allow-account-change"])
     assert "re-claimed" in capsys.readouterr().err
