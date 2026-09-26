@@ -24,17 +24,30 @@ DIR_MODE = 0o700
 def secure_mkdir(path: Path) -> None:
     """Create a directory tree, owner-accessible only.
 
-    ``Path.mkdir(mode=...)`` is subject to the umask, so the mode is applied
-    explicitly afterwards to each level created.
+    ``Path.mkdir(mode=...)`` is subject to the umask, and with
+    ``parents=True`` it creates every missing ancestor with the default mode,
+    ignoring ``mode`` altogether. So the tree is built one level at a time and
+    each level this call creates is chmod'ed explicitly. Ancestors that
+    already existed are left alone -- one may be a home directory -- while
+    ``path`` itself is always tightened, which is how a pre-existing archive
+    root becomes owner-only.
 
     Args:
         path: Directory to create.
     """
-    path.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
-    try:
-        os.chmod(path, DIR_MODE)
-    except OSError:
-        pass
+    path = Path(path)
+    created: list[Path] = []
+    level = path
+    while not level.is_dir() and level != level.parent:
+        created.append(level)
+        level = level.parent
+    for level in reversed(created):
+        level.mkdir(mode=DIR_MODE, exist_ok=True)
+    for level in dict.fromkeys([*created, path]):
+        try:
+            os.chmod(level, DIR_MODE)
+        except OSError:
+            pass
 
 
 def secure_write_text(path: Path, text: str) -> None:

@@ -479,6 +479,11 @@ class Archive:
                 shutil.move(str(old), str(target))
 
         _secure_mkdir(target)
+        # Archives written before secure_mkdir tightened every level it
+        # created have 0755 year and month directories. Tightening the ones
+        # above this note lets an existing archive converge as it is written.
+        for level in target.relative_to(self.root).parents:
+            _secure_mkdir(self.root / level)
 
         _write_json(target / RAW_NAME, note.raw)
         _secure_write_text(target / NOTE_NAME, note_md)

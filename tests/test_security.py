@@ -198,6 +198,74 @@ def test_written_files_and_dirs_are_owner_only(tmp_path: Path):
     assert index_mode == FILE_MODE, "index.json leaks titles and must be owner-only"
 
 
+@pytest.fixture
+def permissive_umask():
+    """Run under the umask most machines have, so modes are not luck.
+
+    Yields:
+        Nothing; the previous umask is restored afterwards.
+    """
+    import os
+
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> int:
+    """Read a path's permission bits.
+
+    Args:
+        path: The file or directory.
+
+    Returns:
+        The mode, without the file-type bits.
+    """
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_every_new_archive_directory_is_owner_only(tmp_path: Path, permissive_umask):
+    """Regression: only the note directory was 0700; its parents were 0755.
+
+    Path.mkdir(parents=True) creates ancestors with the default mode, and the
+    archive root, year and month directories were those ancestors -- so the
+    directory names under them, which are meeting titles, were listable.
+    """
+    archive = Archive(tmp_path / "archive")
+    note = _note(VALID_ID)
+    archive.write_note(note, "# x", None)
+
+    leaf = archive.note_dir(note)
+    for level in (archive.root, leaf.parent.parent, leaf.parent, leaf):
+        assert _mode(level) == DIR_MODE, f"{level} is {oct(_mode(level))}"
+
+
+def test_an_existing_archive_is_tightened_as_it_is_written(tmp_path: Path, permissive_umask):
+    """Year and month directories from before the fix converge on the next write."""
+    archive = Archive(tmp_path / "archive")
+    month = archive.root / "2026" / "01"
+    month.mkdir(parents=True, mode=0o755)
+
+    archive.write_note(_note(VALID_ID), "# x", None)
+
+    for level in (archive.root, month.parent, month):
+        assert _mode(level) == DIR_MODE, f"{level} is {oct(_mode(level))}"
+
+
+def test_secure_mkdir_leaves_existing_ancestors_alone(tmp_path: Path, permissive_umask):
+    """Only levels it creates are tightened; a parent may be a home directory."""
+    from granola_exporter.secure_io import secure_mkdir
+
+    tmp_path.chmod(0o755)
+    secure_mkdir(tmp_path / "a" / "b" / "c")
+
+    for level in ("a", "a/b", "a/b/c"):
+        assert _mode(tmp_path / level) == DIR_MODE, level
+    assert _mode(tmp_path) == 0o755, "a pre-existing ancestor was changed"
+
+
 def test_no_world_readable_temp_window(tmp_path: Path):
     """The atomic-write temp file must not be left behind world-readable."""
     archive = Archive(tmp_path)
