@@ -541,7 +541,12 @@ class MCPClient:
             raise MCPAuthError("no callback server is listening")
         server = self._callback
         code, state = await asyncio.to_thread(server.wait, DEFAULT_CALLBACK_TIMEOUT)
-        return AuthorizationCodeResult(code=code, state=state or None)
+        # The SDK checks iss against the issuer, and rejects a redirect
+        # without one once the server advertises RFC 9207 support -- so
+        # dropping it here would break login the day Granola turns that on.
+        return AuthorizationCodeResult(
+            code=code, state=state or None, iss=server.issuer or None
+        )
 
     # -- calling tools -----------------------------------------------------
 

@@ -367,6 +367,38 @@ def test_callback_surfaces_a_provider_error():
             server.wait(timeout=5)
 
 
+def test_callback_serves_only_the_first_redirect():
+    """Regression: SECURITY.md promises exactly one request on /callback.
+
+    A second request -- a reload, or another page on this machine -- used to
+    overwrite the captured code. The SDK's state and PKCE checks mean that
+    could only break the login, never hijack it, but "exactly one" was not
+    true either.
+    """
+    with LoopbackCallbackServer() as server:
+        urllib.request.urlopen(
+            f"{server.redirect_uri}?code=first&state=s1", timeout=5
+        ).read()
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(
+                f"{server.redirect_uri}?code=evil&state=s2", timeout=5
+            )
+        assert exc.value.code == 404
+        assert server.wait(timeout=5) == ("first", "s1")
+
+
+def test_callback_captures_the_issuer():
+    """RFC 9207's iss is kept, for the SDK to check against the issuer."""
+    with LoopbackCallbackServer() as server:
+        urllib.request.urlopen(
+            f"{server.redirect_uri}?code=c&state=s"
+            "&iss=https%3A%2F%2Fmcp-auth.granola.ai",
+            timeout=5,
+        ).read()
+        server.wait(timeout=5)
+        assert server.issuer == "https://mcp-auth.granola.ai"
+
+
 def test_callback_times_out_cleanly():
     """A user who never completes the flow gets a message, not a hang."""
     with LoopbackCallbackServer() as server:

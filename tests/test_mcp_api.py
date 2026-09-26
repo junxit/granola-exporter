@@ -238,6 +238,32 @@ def test_list_folders_tolerates_either_response_shape():
 # -- connection policy -----------------------------------------------------
 
 
+def test_the_callback_hands_the_issuer_to_the_sdk(tmp_path):
+    """The SDK rejects a redirect without iss once a server advertises it.
+
+    Granola's authorization server does not advertise RFC 9207 today; the
+    day it does, dropping iss here would break every login.
+    """
+    import asyncio
+
+    class _Redirected:
+        issuer = "https://mcp-auth.granola.ai"
+
+        def wait(self, timeout):
+            return "the-code", "the-state"
+
+    client = MCPClient(token_path=tmp_path / "token.json", allow_login=True)
+    client._callback = _Redirected()
+
+    result = asyncio.run(client._callback_handler())
+
+    assert (result.code, result.state, result.iss) == (
+        "the-code",
+        "the-state",
+        "https://mcp-auth.granola.ai",
+    )
+
+
 def test_sync_refuses_to_start_an_interactive_login(tmp_path):
     """A scheduled sync that silently waits on a browser is a broken backup."""
     client = MCPClient(token_path=tmp_path / "absent.json", allow_login=False)

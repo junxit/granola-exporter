@@ -12,6 +12,13 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- The OAuth redirect listener now serves exactly one request on /callback,
+  as SECURITY.md says. A second request -- a reload, or another page on this
+  machine -- overwrote the captured code; the SDK's state and PKCE checks
+  meant that could break a login but never hijack one. The redirect's RFC
+  9207 iss parameter is now passed to the SDK as well: Granola's
+  authorization server does not advertise it yet, and the SDK rejects a
+  redirect without iss once a server does.
 - Every archive directory is now created owner-only, as SECURITY.md says.
   secure_mkdir chmod'ed only the directory it was asked for, but
   Path.mkdir(parents=True) creates the missing ancestors -- here the archive
