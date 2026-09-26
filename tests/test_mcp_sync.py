@@ -783,6 +783,95 @@ def test_mcp_sync_does_not_flag_public_api_notes_missing(tmp_path, note_payload)
     assert Archive(tmp_path).load_index()[note.id]["upstream_missing"] is False
 
 
+# -- folder membership --------------------------------------------------------
+
+
+def _folders_of(tmp_path, n: int) -> list[str]:
+    """Read one archived note's folder names.
+
+    Args:
+        tmp_path: The archive root.
+        n: The meeting's index.
+
+    Returns:
+        The folder names recorded in the index.
+    """
+    return Archive(tmp_path).load_index()[f"mcp_{_uuid(n)}"]["folders"]
+
+
+def test_a_plain_sync_files_a_new_note_in_its_folders(tmp_path):
+    """Regression: only --full listed folders, so a plain sync's notes had none.
+
+    Measured on a live archive: verify found roughly 50 folder memberships
+    that Granola reported and the archive lacked, all from plain syncs.
+    """
+    fake = FakeMCP([(_uuid(1), "Old", date(2026, 7, 1))], folders={"Projects": []})
+    opts = SyncOptions(since=date(2026, 6, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    fake.meetings[_uuid(2)] = (_uuid(2), "New", date(2026, 8, 3))
+    fake.folders["Projects"].append(_uuid(2))
+    fake.calls.clear()
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert _folders_of(tmp_path, 2) == ["Projects"]
+    per_folder = [a for n, a in fake.calls if n == "list_meetings" and a[2] is not None]
+    assert len(per_folder) == 1, "one listing per folder, for the trailing window"
+
+
+def test_a_full_sync_records_folders_a_plain_sync_missed(tmp_path):
+    """A --full re-reads a note whose folders changed, even if its listing did not.
+
+    Membership was applied only to notes re-read for some other reason, so a
+    note archived without folders kept an empty list through every --full.
+    """
+    fake = FakeMCP([(_uuid(1), "Filed later", date(2026, 3, 10))], folders={"Projects": []})
+    opts = SyncOptions(since=date(2026, 1, 1), refresh_batch=0)
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert _folders_of(tmp_path, 1) == []
+
+    fake.folders["Projects"].append(_uuid(1))
+    full = SyncOptions(since=date(2026, 1, 1), refresh_batch=0, full=True)
+    sync_mcp(Archive(tmp_path), fake, full, today=TODAY)
+
+    assert _folders_of(tmp_path, 1) == ["Projects"]
+
+
+def test_leaving_every_folder_is_recorded(tmp_path):
+    """Regression: an empty membership fell back to the stored folders forever."""
+    fake = FakeMCP(
+        [(_uuid(1), "Unfiled later", date(2026, 3, 10))], folders={"Projects": [_uuid(1)]}
+    )
+    full = SyncOptions(since=date(2026, 1, 1), refresh_batch=0, full=True)
+    sync_mcp(Archive(tmp_path), fake, full, today=TODAY)
+    assert _folders_of(tmp_path, 1) == ["Projects"]
+
+    fake.folders["Projects"].clear()
+    sync_mcp(Archive(tmp_path), fake, full, today=TODAY)
+    assert _folders_of(tmp_path, 1) == []
+
+    fake.calls.clear()
+    counts = sync_mcp(Archive(tmp_path), fake, full, today=TODAY)
+    assert counts.detail_fetches == 0, "once recorded, it must not be re-read forever"
+
+
+def test_a_truncated_folder_listing_changes_no_folders(tmp_path):
+    """A folder listing that may have been cut short cannot prove absence."""
+    busy = date(2026, 4, 1)
+    crowd = [(_uuid(100 + i), f"Busy {i}", busy) for i in range(SUSPICIOUS_RESULT_COUNT)]
+    fake = FakeMCP(
+        [(_uuid(1), "Filed", date(2026, 3, 10)), *crowd],
+        folders={"Projects": [_uuid(1)] + [m[0] for m in crowd]},
+    )
+    full = SyncOptions(since=date(2026, 1, 1), refresh_batch=0, full=True)
+    sync_mcp(Archive(tmp_path), fake, full, today=TODAY)
+
+    fake.folders["Projects"].remove(_uuid(1))
+    sync_mcp(Archive(tmp_path), fake, full, today=TODAY)
+
+    assert _folders_of(tmp_path, 1) == ["Projects"], "a truncated listing stripped a folder"
+
+
 # -- upstream-missing sweep ---------------------------------------------------
 
 

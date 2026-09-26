@@ -1,6 +1,21 @@
 Changelog
 =========
 
+0.6.1
+-----
+- MCP notes now carry their folders. Only sync --full listed folder
+  membership, and it applied it only to notes it re-read for some other
+  reason, so a note first archived by a plain sync kept an empty folder list
+  through every later run. Measured on a live archive, verify counted about
+  50 folder memberships that Granola reported and the archive lacked. A
+  plain sync now lists each folder over the trailing window -- one listing
+  per folder -- so a new note is filed at once, and --full re-reads any note
+  whose folders changed.
+- A note moved out of every folder now loses its folders. An empty
+  membership fell back to the stored folders, so they stayed forever. Only a
+  complete listing is trusted to remove one: a folder listing that may have
+  been cut short can add folders but never takes one away.
+
 0.6.0
 -----
 - An MCP sync that hits a malformed response partway through no longer

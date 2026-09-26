@@ -576,6 +576,7 @@ def sync_mcp(
             client, counts, today=today, floor=opts.since,
             window_days=LISTING_WINDOW_DAYS, verbose=opts.verbose,
         )
+        scanned = set(meetings)
     else:
         print(f"Syncing MCP (trailing {opts.window_days} days) -> {archive.root}")
         meetings = {
@@ -584,6 +585,9 @@ def sync_mcp(
                 client, trailing_start, today, counts, verbose=opts.verbose
             )
         }
+        # Before any retry listing: folder membership below covers exactly
+        # the trailing window.
+        scanned = set(meetings)
         earliest = str(state.get("earliest_scanned") or trailing_start.isoformat())
         earliest = date.fromisoformat(earliest)
 
@@ -600,14 +604,22 @@ def sync_mcp(
                     meetings[meeting.meeting_id] = meeting
                     retry_ids.add(meeting.meeting_id)
 
-    folders = (
-        _folder_membership(client, earliest, today, counts, opts.verbose)
-        if full
-        else {}
+    # Folder membership costs one listing per folder, over the range the
+    # meetings were just listed across: the whole history on --full, the
+    # trailing window otherwise -- so a note a plain sync archives is filed at
+    # once, not at the next --full.
+    before = counts.truncated_windows
+    folders = _folder_membership(
+        client, earliest if full else trailing_start, today, counts, opts.verbose
     )
+    # Authoritative only for meetings listed across that range, and not at all
+    # if a folder listing may have been cut short: a meeting absent from every
+    # folder must mean "in none", never "not seen".
+    known = scanned if counts.truncated_windows == before else set()
 
     pending, settled = _triage(
-        archive, index, uuid_map, meetings.values(), trailing_start, counts
+        archive, index, uuid_map, meetings.values(), trailing_start, counts,
+        folders=folders, known=known,
     )
     queued = {m.meeting_id for m in pending}
 
@@ -645,7 +657,7 @@ def sync_mcp(
         more, also = _triage(
             archive, index, uuid_map,
             [m for m in fresh if m.meeting_id not in wanted],
-            trailing_start, counts,
+            trailing_start, counts, folders=folders, known=known,
         )
         pending += more
         settled |= also
@@ -667,17 +679,17 @@ def sync_mcp(
     try:
         failed = _write_mcp_meetings(
             archive, client, pending, folders, counts, opts, server_url,
-            latch=latch,
+            latch=latch, known=known,
         )
         failed += _write_mcp_meetings(
             archive, client, retries, folders, counts, opts, server_url,
-            latch=latch, batch_size=1,
+            latch=latch, batch_size=1, known=known,
         )
         # Last, so real work gets the transcript budget first; optional, so a
         # note that cannot be re-read warns instead of failing the run.
         _write_mcp_meetings(
             archive, client, refresh, folders, counts, opts, server_url,
-            latch=latch, optional=True,
+            latch=latch, optional=True, known=known,
         )
     except BaseException:
         # Drift is still loud -- the error propagates -- but the notes this
@@ -756,6 +768,9 @@ def _triage(
     meetings: Iterable[MCPMeeting],
     trailing_start: date,
     counts: SyncCounts,
+    *,
+    folders: dict[str, set[str]],
+    known: set[str],
 ) -> tuple[list[MCPMeeting], set[str]]:
     """Split listed meetings into those needing a detail call and the rest.
 
@@ -766,6 +781,8 @@ def _triage(
         meetings: Listed meetings.
         trailing_start: First day of the always-re-read trailing window.
         counts: Tally to update.
+        folders: Meeting id to folder names, from this run's listing.
+        known: Meeting ids whose membership in ``folders`` is authoritative.
 
     Returns:
         The meetings to fetch, and the ids settled without a fetch. The
@@ -792,16 +809,45 @@ def _triage(
             continue
 
         entry = index.get(key) or {}
-        stored = (entry.get("mcp") or {}).get("listing_hash")
+        block = entry.get("mcp") or {}
         if (
-            stored == listing_hash(meeting.element_text)
+            block.get("listing_hash") == listing_hash(meeting.element_text)
             and not _within(meeting, trailing_start)
             and (archive.root / str(entry.get("path", ""))).is_dir()
+            # Folders are not in the listing element, so a note filed or
+            # unfiled since it was archived looks unchanged without this.
+            and not _folders_moved(meeting.meeting_id, block, folders, known)
         ):
             settled.add(meeting.meeting_id)
             continue
         pending.append(meeting)
     return pending, settled
+
+
+def _folders_moved(
+    meeting_id: str,
+    block: dict[str, Any],
+    folders: dict[str, set[str]],
+    known: set[str],
+) -> bool:
+    """Whether a note's folders differ from those this run listed.
+
+    Args:
+        meeting_id: The meeting.
+        block: Its index entry's ``mcp`` block.
+        folders: Meeting id to folder names, from this run's listing.
+        known: Meeting ids whose membership in ``folders`` is authoritative.
+
+    Returns:
+        ``True`` when authoritative membership disagrees with what the archive
+        recorded, or -- authoritative or not -- a listing shows the note in a
+        folder the archive lacks, which is proof on its own.
+    """
+    stored = set(block.get("folders") or [])
+    listed = folders.get(meeting_id, set())
+    if meeting_id in known:
+        return listed != stored
+    return not listed <= stored
 
 
 def _mcp_block(entry: dict[str, Any]) -> dict[str, Any]:
@@ -932,6 +978,7 @@ def _write_mcp_meetings(
     latch: _TranscriptLatch,
     batch_size: int | None = None,
     optional: bool = False,
+    known: set[str] | None = None,
 ) -> list[MCPMeeting]:
     """Fetch details and transcripts for queued meetings, then archive them.
 
@@ -949,6 +996,9 @@ def _write_mcp_meetings(
         optional: Whether these are re-reads of notes already archived. A
             failed optional batch loses nothing, so it warns and is counted
             as ``refresh_failed`` rather than failing the run.
+        known: Meeting ids whose membership in ``folders`` is authoritative.
+            Any other note keeps the folders it has, plus any a listing shows
+            it in.
 
     Returns:
         The meetings whose detail fetch failed and must be retried. An
@@ -1052,7 +1102,17 @@ def _write_mcp_meetings(
                             file=sys.stderr,
                         )
 
-            names = folders.get(detail.meeting_id) or set(previous.get("folders") or [])
+            # Authoritative membership is taken as-is, empty included: falling
+            # back to the stored folders whenever none were listed meant a
+            # note moved out of every folder kept its old ones forever. Any
+            # other listing can prove a note is in a folder, never that it is
+            # not, so it may add folders but not remove them.
+            listed = folders.get(detail.meeting_id, set())
+            names = (
+                set(listed)
+                if detail.meeting_id in (known or set())
+                else set(previous.get("folders") or []) | listed
+            )
             listing = listings.get(detail.meeting_id, detail)
             raw = build_raw(
                 detail,
