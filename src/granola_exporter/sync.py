@@ -61,8 +61,12 @@ MIN_WINDOW_DAYS = 1
 # re-reading a fixed number of the least-recently-checked notes each run.
 ROLLING_REFRESH_DEFAULT = 30
 
-# Backfill walks backwards until this many consecutive windows come back empty.
-EMPTY_WINDOWS_BEFORE_STOP = 2
+# Backfill walks backwards until this many consecutive windows come back empty
+# -- about six months. Each extra window is one cheap listing call, while
+# stopping too early silently drops everything older than the first quiet
+# stretch; two windows ended a backfill at any two-month lull. `--since`
+# reaches past a longer gap.
+EMPTY_WINDOWS_BEFORE_STOP = 6
 
 # Transcripts are the most aggressively limited tool on the MCP, and each
 # exhausted retry ladder costs about two minutes of sleeping. Once this many
@@ -517,9 +521,11 @@ def sync_mcp(
     if full:
         mode = "full backfill" if not opts.since else f"backfill since {opts.since}"
         print(f"Syncing MCP ({mode}) -> {archive.root}")
+        # Always month-wide: `--window` sizes the trailing rescan, and a small
+        # one here would let a couple of short empty windows end the backfill.
         meetings, earliest = _discover(
             client, counts, today=today, floor=opts.since,
-            window_days=opts.window_days, verbose=opts.verbose,
+            window_days=LISTING_WINDOW_DAYS, verbose=opts.verbose,
         )
     else:
         print(f"Syncing MCP (trailing {opts.window_days} days) -> {archive.root}")

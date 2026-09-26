@@ -12,6 +12,15 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- An unbounded MCP backfill no longer stops at the first two-month lull.
+  Discovery walked back until two consecutive empty 31-day windows, silently
+  dropping everything older than any quiet stretch that long. It now waits
+  for six -- about six months, at four more cheap listing calls -- and
+  --since reaches past longer gaps. --window also stopped sizing the
+  backfill's windows; it only ever meant the trailing rescan, and a small
+  value let a backfill end at the first quiet fortnight.
+- --window must be at least 1 and --refresh-batch at least 0. A negative
+  window used to start the trailing rescan after today.
 - Fixed CLI tests that leaked fake-client state into each other. They
   assigned _FakeMCPClient.folders and .listing directly, so a value outlived
   the test that set it: test_allow_account_change_reclaims never set a

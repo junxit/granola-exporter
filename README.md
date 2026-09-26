@@ -366,6 +366,10 @@ API key, use it — this backend exists for accounts that cannot get one.
   listing was not truncated. Windows returning 50+ results are bisected and
   rescanned; a single day still at the cap is *reported* as possibly incomplete
   rather than silently trusted.
+- **A backfill ends at a long silence.** Without `--since`, it walks back month
+  by month until six consecutive months come back empty, and takes that as the
+  start of your history. If yours has a longer gap, pass `--since` to reach
+  past it.
 - **Transcripts lose their structure.** The MCP returns one flat string with
   inline `Me:`/`Them:`/`Name:` labels and no timing at all. It is split back
   into speaker turns heuristically, and `transcript.md` carries

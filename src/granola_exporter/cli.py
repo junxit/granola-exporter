@@ -230,6 +230,32 @@ def _mcp_storage(config: Config):
     return FileTokenStorage(_token_path(config), config.mcp_url)
 
 
+def _at_least(minimum: int):
+    """Build an argparse ``type`` accepting integers no smaller than ``minimum``.
+
+    Args:
+        minimum: The smallest value allowed.
+
+    Returns:
+        A converter for ``add_argument(type=...)``.
+    """
+
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"expected an integer, got {value!r}"
+            ) from None
+        if number < minimum:
+            raise argparse.ArgumentTypeError(
+                f"must be at least {minimum}, got {number}"
+            )
+        return number
+
+    return parse
+
+
 def _parse_since(value: str | None) -> date | None:
     """Parse a ``--since`` argument.
 
@@ -873,14 +899,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     sync.add_argument(
         "--window",
-        type=int,
+        # A negative window used to start the rescan after today.
+        type=_at_least(1),
         default=None,
         metavar="DAYS",
         help="trailing days an MCP sync rescans for edits (default: 31)",
     )
     sync.add_argument(
         "--refresh-batch",
-        type=int,
+        type=_at_least(0),
         default=None,
         metavar="N",
         help="MCP notes to re-read per run to catch older edits (default: 30)",

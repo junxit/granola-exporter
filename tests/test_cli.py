@@ -252,6 +252,23 @@ def test_unknown_source_is_rejected_by_argparse(capsys):
     assert "invalid choice" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [["--window", "0"], ["--window", "-5"], ["--refresh-batch", "-1"]],
+)
+def test_out_of_range_counts_are_rejected(argv, capsys):
+    """A negative --window used to start the rescan after today."""
+    with pytest.raises(SystemExit):
+        main(["sync", *argv])
+    assert argv[0] in capsys.readouterr().err
+
+
+def test_refresh_batch_zero_turns_the_refresh_off(capsys):
+    """Zero is a meaningful setting, so it parses and the run proceeds."""
+    assert main(["sync", "--source", "public-api", "--refresh-batch", "0"]) == 1
+    assert "GRANOLA_API_KEY" in capsys.readouterr().err
+
+
 # -- guardrails ------------------------------------------------------------
 
 
