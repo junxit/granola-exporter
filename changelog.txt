@@ -12,6 +12,14 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- MCP notes can now be flagged upstream_missing, so the retention guarantee
+  holds for them too; sync_mcp never swept, so a meeting deleted upstream
+  looked current forever. Only an unbounded sync --full with no truncated
+  windows sets the flag -- a bounded or possibly cut-short listing proves
+  nothing -- and only for MCP notes dated after the oldest meeting the scan
+  listed, so history the MCP no longer serves (the free plan's ends at 30
+  days) is not mistaken for deletion. Nothing is deleted, and a note that
+  reappears is cleared.
 - Older MCP notes are revisited by a plain sync, as the README always said.
   A plain sync lists only the trailing window, so a transcript missing after
   a throttled backfill was never retried there, and --full did not help: it

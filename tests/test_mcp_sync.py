@@ -783,6 +783,125 @@ def test_mcp_sync_does_not_flag_public_api_notes_missing(tmp_path, note_payload)
     assert Archive(tmp_path).load_index()[note.id]["upstream_missing"] is False
 
 
+# -- upstream-missing sweep ---------------------------------------------------
+
+
+def _march() -> FakeMCP:
+    """Three March meetings, the middle one about to disappear upstream.
+
+    Returns:
+        The fake backend.
+    """
+    return FakeMCP(
+        [
+            (_uuid(1), "First", date(2026, 3, 10)),
+            (_uuid(2), "Deleted later", date(2026, 3, 12)),
+            (_uuid(3), "Third", date(2026, 3, 20)),
+        ]
+    )
+
+
+def _missing(tmp_path) -> dict[str, bool]:
+    """Read every note's upstream_missing flag.
+
+    Args:
+        tmp_path: The archive root.
+
+    Returns:
+        Archive key to flag.
+    """
+    return {k: v["upstream_missing"] for k, v in Archive(tmp_path).load_index().items()}
+
+
+def test_full_scan_flags_a_meeting_the_mcp_no_longer_lists(tmp_path):
+    """The retention guarantee now holds for MCP notes too, never by deleting."""
+    fake = _march()
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    del fake.meetings[_uuid(2)]
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+
+    flags = _missing(tmp_path)
+    assert flags[f"mcp_{_uuid(2)}"] is True
+    assert not flags[f"mcp_{_uuid(1)}"] and not flags[f"mcp_{_uuid(3)}"]
+    entry = Archive(tmp_path).load_index()[f"mcp_{_uuid(2)}"]
+    assert (tmp_path / entry["path"]).is_dir(), "flagged, never deleted"
+
+
+def test_a_bounded_scan_never_flags(tmp_path):
+    """--since covers only part of the history, so absence proves nothing."""
+    fake = _march()
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    del fake.meetings[_uuid(2)]
+    sync_mcp(
+        Archive(tmp_path), fake, SyncOptions(full=True, since=date(2026, 1, 1)), today=TODAY
+    )
+
+    assert not any(_missing(tmp_path).values())
+
+
+def test_a_truncated_scan_never_flags(tmp_path):
+    """A listing that may have been cut short cannot prove a meeting is gone."""
+    busy = date(2026, 4, 1)
+    fake = FakeMCP(
+        # The anchor keeps the doomed meeting inside the trusted range, so
+        # only the truncation guard can stop it being flagged.
+        [(_uuid(1), "Doomed", date(2026, 4, 10)), (_uuid(2), "Anchor", date(2026, 3, 1))]
+        + [(_uuid(100 + i), f"Busy {i}", busy) for i in range(SUSPICIOUS_RESULT_COUNT)]
+    )
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    del fake.meetings[_uuid(1)]
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+
+    assert counts.truncated_windows > 0
+    assert not _missing(tmp_path)[f"mcp_{_uuid(1)}"]
+
+
+def test_the_sweep_stops_at_the_oldest_listed_meeting(tmp_path):
+    """History the MCP no longer lists at all is not evidence of deletion.
+
+    This is the free Basic plan's shape: meetings older than 30 days stop
+    being served, and flagging every one of them would bury real deletions.
+    """
+    fake = FakeMCP(
+        [(_uuid(1), "Aged out", date(2026, 1, 5)), (_uuid(2), "Recent", date(2026, 3, 10))]
+    )
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    del fake.meetings[_uuid(1)]
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+
+    assert not _missing(tmp_path)[f"mcp_{_uuid(1)}"]
+
+
+def test_a_note_that_reappears_is_cleared(tmp_path):
+    """A flag is a statement about now, not a verdict."""
+    fake = _march()
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+    gone = fake.meetings.pop(_uuid(2))
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+    assert _missing(tmp_path)[f"mcp_{_uuid(2)}"] is True
+
+    fake.meetings[_uuid(2)] = gone
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+
+    assert _missing(tmp_path)[f"mcp_{_uuid(2)}"] is False
+
+
+def test_a_full_mcp_scan_leaves_public_api_notes_alone(tmp_path, note_payload):
+    """The MCP sweep is scoped to MCP notes; the public API has its own."""
+    archive = Archive(tmp_path)
+    note = Note.from_api(note_payload)
+    archive.write_note(note, "# x", None)
+    archive.save_index()
+
+    sync_mcp(Archive(tmp_path), _march(), SyncOptions(full=True), today=TODAY)
+
+    assert _missing(tmp_path)[note.id] is False
+
+
 # -- state -----------------------------------------------------------------
 
 
