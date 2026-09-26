@@ -132,6 +132,11 @@ class SyncCounts:
             Human-readable warnings; empty when the run was clean.
         """
         notes = []
+        if self.failed:
+            notes.append(
+                f"{self.failed} note(s) could not be fetched — the next sync "
+                "retries them"
+            )
         if self.transcripts_failed:
             notes.append(
                 f"{self.transcripts_failed} note(s) archived WITHOUT a transcript "
@@ -155,6 +160,18 @@ class SyncCounts:
                 "re-run with --full"
             )
         return notes
+
+
+@dataclass(slots=True)
+class _TranscriptLatch:
+    """Consecutive throttled transcript fetches, and whether to stop asking.
+
+    Shared by every write pass in a run, so a quota spent in one pass is not
+    rediscovered -- at about two minutes a note -- by the next.
+    """
+
+    throttled: int = 0
+    giving_up: bool = False
 
 
 def _stub_updated_at(stub: dict[str, Any]) -> str | None:
@@ -517,6 +534,8 @@ def sync_mcp(
 
     full = opts.full or not state.get("scanned_through")
     trailing_start = today - timedelta(days=opts.window_days)
+    # Meetings listed only because the last run failed to fetch them.
+    retry_ids: set[str] = set()
 
     if full:
         mode = "full backfill" if not opts.since else f"backfill since {opts.since}"
@@ -537,6 +556,19 @@ def sync_mcp(
         }
         earliest = str(state.get("earliest_scanned") or trailing_start.isoformat())
         earliest = date.fromisoformat(earliest)
+
+        # The trailing window alone would never list a failure older than it.
+        retry_from = _stored_date(state.get("retry_from"))
+        if retry_from is not None and retry_from < trailing_start:
+            print(f"  retrying what failed last time, back to {retry_from}")
+            for window_start, window_end in _iter_windows(
+                retry_from, trailing_start - timedelta(days=1), LISTING_WINDOW_DAYS
+            ):
+                for meeting in _scan_window(
+                    client, window_start, window_end, counts, verbose=opts.verbose
+                ):
+                    meetings[meeting.meeting_id] = meeting
+                    retry_ids.add(meeting.meeting_id)
 
     folders = (
         _folder_membership(client, earliest, today, counts, opts.verbose)
@@ -577,9 +609,20 @@ def sync_mcp(
 
     pending.extend(_refresh_batch(archive, index, meetings, opts.refresh_batch))
 
+    # A meeting that failed last time is fetched on its own, so one that
+    # always fails cannot take a batch of good ones down with it on every run.
+    retries = [m for m in pending if m.meeting_id in retry_ids]
+    pending = [m for m in pending if m.meeting_id not in retry_ids]
+
+    latch = _TranscriptLatch()
     try:
-        _write_mcp_meetings(
-            archive, client, pending, folders, counts, opts, server_url
+        failed = _write_mcp_meetings(
+            archive, client, pending, folders, counts, opts, server_url,
+            latch=latch,
+        )
+        failed += _write_mcp_meetings(
+            archive, client, retries, folders, counts, opts, server_url,
+            latch=latch, batch_size=1,
         )
     except BaseException:
         # Drift is still loud -- the error propagates -- but the notes this
@@ -588,6 +631,7 @@ def sync_mcp(
         archive.save_index()
         raise
 
+    retry_floor = _retry_floor(failed, earliest)
     archive.save_index()
     archive.save_source_state(
         SOURCE_MCP,
@@ -595,6 +639,7 @@ def sync_mcp(
         scanned_through=today.isoformat(),
         parser_version=PARSER_VERSION,
         truncated_windows=counts.truncated_windows,
+        retry_from=retry_floor.isoformat() if retry_floor else None,
         **({"last_full_scan": today.isoformat()} if full else {}),
     )
     return counts
@@ -699,7 +744,10 @@ def _write_mcp_meetings(
     counts: SyncCounts,
     opts: SyncOptions,
     server_url: str,
-) -> None:
+    *,
+    latch: _TranscriptLatch,
+    batch_size: int | None = None,
+) -> list[MCPMeeting]:
     """Fetch details and transcripts for queued meetings, then archive them.
 
     Args:
@@ -710,17 +758,20 @@ def _write_mcp_meetings(
         counts: Tally to update.
         opts: Per-run options.
         server_url: Recorded in ``raw.json``.
+        latch: Throttling state shared with the run's other write passes.
+        batch_size: Ids per ``get_meetings`` call; defaults to the server's
+            maximum.
+
+    Returns:
+        The meetings whose detail fetch failed, for the next run to retry.
     """
     from .mcp_api import MAX_MEETINGS_PER_CALL
 
     index = archive.load_index()
     listings = {m.meeting_id: m for m in pending}
+    failed: list[MCPMeeting] = []
 
-    # Consecutive transcript fetches lost to throttling, and the latch it trips.
-    throttled = 0
-    giving_up = False
-
-    for batch in _chunk(pending, MAX_MEETINGS_PER_CALL):
+    for batch in _chunk(pending, batch_size or MAX_MEETINGS_PER_CALL):
         try:
             text = client.get_meetings([m.meeting_id for m in batch])
             counts.detail_fetches += len(batch)
@@ -729,6 +780,7 @@ def _write_mcp_meetings(
             raise
         except Exception as exc:  # noqa: BLE001 - one bad batch must not end the run
             counts.failed += len(batch)
+            failed.extend(batch)
             print(f"  FAIL  batch of {len(batch)} — {exc}", file=sys.stderr)
             continue
 
@@ -753,7 +805,7 @@ def _write_mcp_meetings(
                 if entry.get("has_transcript") and transcript_at
                 else None
             )
-            if transcript is None and giving_up:
+            if transcript is None and latch.giving_up:
                 # The quota is spent. Archive the note now rather than sleeping
                 # through a retry ladder that cannot succeed; the next run
                 # picks up exactly these notes.
@@ -764,7 +816,7 @@ def _write_mcp_meetings(
                     transcript = parse_transcript(payload)
                     counts.transcript_fetches += 1
                     transcript_at = _now_iso()
-                    throttled = 0
+                    latch.throttled = 0
                 except MCPResponseFormatError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -779,11 +831,13 @@ def _write_mcp_meetings(
                     )
                     # Only throttling says anything about the *next* note; one
                     # unparseable or missing transcript says nothing at all.
-                    throttled = throttled + 1 if _is_throttling(exc) else 0
-                    if throttled >= TRANSCRIPT_GIVEUP_STREAK:
-                        giving_up = True
+                    latch.throttled = (
+                        latch.throttled + 1 if _is_throttling(exc) else 0
+                    )
+                    if latch.throttled >= TRANSCRIPT_GIVEUP_STREAK:
+                        latch.giving_up = True
                         print(
-                            f"  STOP  {throttled} transcripts throttled in a row "
+                            f"  STOP  {latch.throttled} transcripts throttled in a row "
                             "— skipping the rest this pass; re-run sync to "
                             "retry them",
                             file=sys.stderr,
@@ -835,6 +889,49 @@ def _write_mcp_meetings(
             counts.record(result.status)
             if opts.verbose:
                 print(f"  {result.status:9} {note.display_title}")
+
+    return failed
+
+
+def _stored_date(value: Any) -> date | None:
+    """Read an ISO date back out of the sync state.
+
+    Args:
+        value: Whatever the state file holds.
+
+    Returns:
+        The date, or ``None`` when absent or unreadable -- the state file is
+        on disk and can be edited, so it is read defensively.
+    """
+    try:
+        return date.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+
+
+def _retry_floor(failed: list[MCPMeeting], fallback: date) -> date | None:
+    """The date the next run must list back to, to retry this run's failures.
+
+    This is the MCP's version of the public API holding its watermark. With
+    no updated-since filter, a failed meeting outside the trailing window is
+    never listed again by an incremental run, so the next run is told how far
+    back to look.
+
+    Args:
+        failed: Meetings whose detail fetch failed.
+        fallback: The date to use for a failure whose own date won't parse.
+
+    Returns:
+        A day before the earliest failure -- listings are keyed by local date
+        and instants by UTC -- or ``None`` when nothing failed.
+    """
+    if not failed:
+        return None
+    dates = []
+    for meeting in failed:
+        instant = parse_mcp_date(meeting.date_text).instant
+        dates.append(instant.date() if instant else fallback)
+    return min(dates) - timedelta(days=1)
 
 
 def _now_iso() -> str:

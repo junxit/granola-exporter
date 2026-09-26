@@ -12,6 +12,16 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- A failed MCP detail fetch is now retried by the next plain sync. The pass
+  recorded scanned_through regardless, so the next run was incremental,
+  never listed a failed meeting older than the trailing window again, and
+  exited 0 while the archive stayed short. The pass now records how far back
+  its failures go (retry_from in .sync-state.json), the next run lists back
+  that far, and warns "N note(s) could not be fetched -- the next sync
+  retries them". Retries go one meeting per call, so a meeting that always
+  fails cannot take a batch of good ones down with it. Note for scheduled
+  runs: such a meeting keeps sync exiting 1 until it lands or disappears
+  upstream, which is how the public API has always behaved.
 - An unbounded MCP backfill no longer stops at the first two-month lull.
   Discovery walked back until two consecutive empty 31-day windows, silently
   dropping everything older than any quiet stretch that long. It now waits
