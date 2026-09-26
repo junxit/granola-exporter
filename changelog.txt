@@ -12,65 +12,16 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
-- CI now tests Python 3.13 as well as 3.14. requires-python allows 3.13, but
-  without a pin uv chose the newest interpreter, so the floor was never
-  tested. A lint job runs ruff with its rule selection pinned to real errors
-  -- undefined names, unused imports, syntax -- so a Dependabot bump of ruff
-  cannot fail CI with new style rules; it found three unused imports.
-- Corrected .env.example, which said a relative GRANOLA_ARCHIVE_DIR resolves
-  from the repo root. It resolves against the directory you run from, while
-  .env is found by walking up from the package, so a scheduled run started
-  elsewhere reads the right .env yet quietly backfills a second, unclaimed
-  archive -- which the account guard cannot catch. Use an absolute path for
-  scheduled runs; the behavior is unchanged, since changing it would move
-  existing archives. The README also gained verify's --source and --deep.
-- A public API detail payload whose id differs from the one requested is
-  counted as failed rather than archived. The id builds the archive path: a
-  malformed one raised UnsafeArchivePathError and aborted the whole run, and
-  a well-formed but different one filed the note under another note's key.
-- The OAuth redirect listener now serves exactly one request on /callback,
-  as SECURITY.md says. A second request -- a reload, or another page on this
-  machine -- overwrote the captured code; the SDK's state and PKCE checks
-  meant that could break a login but never hijack one. The redirect's RFC
-  9207 iss parameter is now passed to the SDK as well: Granola's
-  authorization server does not advertise it yet, and the SDK rejects a
-  redirect without iss once a server does.
-- Every archive directory is now created owner-only, as SECURITY.md says.
-  secure_mkdir chmod'ed only the directory it was asked for, but
-  Path.mkdir(parents=True) creates the missing ancestors -- here the archive
-  root and the year and month directories -- with the default 0755, so the
-  meeting-title directory names beneath them were listable by other local
-  users until something tightened the root. Levels are now created one at a
-  time and each is chmod'ed; ancestors that already existed are untouched.
-  Year and month directories from earlier releases are tightened as notes
-  are written into them.
-- verify now reports an account mismatch as a warning, as 0.5.0 documented
-  but never did: it printed only the recorded account, without even the
-  inference doctor makes for an archive from before accounts were recorded.
-  Both commands now share one wording, and verify's cheap MCP check costs two
-  requests rather than one.
-- Account emails are compared case-insensitively, so a sync is no longer
-  refused because two backends capitalize the same address differently.
-- The version is read from the installed package, so pyproject.toml is its
-  one source. The hand-kept copy in __init__.py sat at 0.3.0 through 0.4.0
-  and 0.5.0, and both backends send it as the User-Agent, so every request
-  since 0.4.0 announced the wrong version. Added granola-export --version.
-- logout --all now removes the default credentials even when
-  GRANOLA_MCP_PROFILE is set, as the README suggests doing per Terminal tab.
-  The default slot was resolved through that variable, so it became the
-  named profile, the default mcp-oauth.json survived, and the command still
-  reported success; a malformed value stopped the sweep altogether. The help
-  and README also said --all cannot reach a GRANOLA_MCP_TOKEN_FILE file; it
-  removes the one the variable names now, and only a file an earlier session
-  pointed elsewhere is out of reach.
-- MCP notes can now be flagged upstream_missing, so the retention guarantee
-  holds for them too; sync_mcp never swept, so a meeting deleted upstream
-  looked current forever. Only an unbounded sync --full with no truncated
-  windows sets the flag -- a bounded or possibly cut-short listing proves
-  nothing -- and only for MCP notes dated after the oldest meeting the scan
-  listed, so history the MCP no longer serves (the free plan's ends at 30
-  days) is not mistaken for deletion. Nothing is deleted, and a note that
-  reappears is cleared.
+- A failed MCP detail fetch is now retried by the next plain sync. The pass
+  recorded scanned_through regardless, so the next run was incremental,
+  never listed a failed meeting older than the trailing window again, and
+  exited 0 while the archive stayed short. The pass now records how far back
+  its failures go (retry_from in .sync-state.json), the next run lists back
+  that far, and warns "N note(s) could not be fetched -- the next sync
+  retries them". Retries go one meeting per call, so a meeting that always
+  fails cannot take a batch of good ones down with it. Note for scheduled
+  runs: such a meeting keeps sync exiting 1 until it lands or disappears
+  upstream, which is how the public API has always behaved.
 - Older MCP notes are revisited by a plain sync, as the README always said.
   A plain sync lists only the trailing window, so a transcript missing after
   a throttled backfill was never retried there, and --full did not help: it
@@ -93,16 +44,14 @@ Changelog
 - An MCP transcript that comes back for a different meeting than the one
   requested is rejected rather than archived, and an empty transcript is no
   longer refetched every time its note is re-read.
-- A failed MCP detail fetch is now retried by the next plain sync. The pass
-  recorded scanned_through regardless, so the next run was incremental,
-  never listed a failed meeting older than the trailing window again, and
-  exited 0 while the archive stayed short. The pass now records how far back
-  its failures go (retry_from in .sync-state.json), the next run lists back
-  that far, and warns "N note(s) could not be fetched -- the next sync
-  retries them". Retries go one meeting per call, so a meeting that always
-  fails cannot take a batch of good ones down with it. Note for scheduled
-  runs: such a meeting keeps sync exiting 1 until it lands or disappears
-  upstream, which is how the public API has always behaved.
+- MCP notes can now be flagged upstream_missing, so the retention guarantee
+  holds for them too; sync_mcp never swept, so a meeting deleted upstream
+  looked current forever. Only an unbounded sync --full with no truncated
+  windows sets the flag -- a bounded or possibly cut-short listing proves
+  nothing -- and only for MCP notes dated after the oldest meeting the scan
+  listed, so history the MCP no longer serves (the free plan's ends at 30
+  days) is not mistaken for deletion. Nothing is deleted, and a note that
+  reappears is cleared.
 - An unbounded MCP backfill no longer stops at the first two-month lull.
   Discovery walked back until two consecutive empty 31-day windows, silently
   dropping everything older than any quiet stretch that long. It now waits
@@ -112,6 +61,57 @@ Changelog
   value let a backfill end at the first quiet fortnight.
 - --window must be at least 1 and --refresh-batch at least 0. A negative
   window used to start the trailing rescan after today.
+- A public API detail payload whose id differs from the one requested is
+  counted as failed rather than archived. The id builds the archive path: a
+  malformed one raised UnsafeArchivePathError and aborted the whole run, and
+  a well-formed but different one filed the note under another note's key.
+- verify now reports an account mismatch as a warning, as 0.5.0 documented
+  but never did: it printed only the recorded account, without even the
+  inference doctor makes for an archive from before accounts were recorded.
+  Both commands now share one wording, and verify's cheap MCP check costs two
+  requests rather than one.
+- Account emails are compared case-insensitively, so a sync is no longer
+  refused because two backends capitalize the same address differently.
+- logout --all now removes the default credentials even when
+  GRANOLA_MCP_PROFILE is set, as the README suggests doing per Terminal tab.
+  The default slot was resolved through that variable, so it became the
+  named profile, the default mcp-oauth.json survived, and the command still
+  reported success; a malformed value stopped the sweep altogether. The help
+  and README also said --all cannot reach a GRANOLA_MCP_TOKEN_FILE file; it
+  removes the one the variable names now, and only a file an earlier session
+  pointed elsewhere is out of reach.
+- The version is read from the installed package, so pyproject.toml is its
+  one source. The hand-kept copy in __init__.py sat at 0.3.0 through 0.4.0
+  and 0.5.0, and both backends send it as the User-Agent, so every request
+  since 0.4.0 announced the wrong version. Added granola-export --version.
+- Every archive directory is now created owner-only, as SECURITY.md says.
+  secure_mkdir chmod'ed only the directory it was asked for, but
+  Path.mkdir(parents=True) creates the missing ancestors -- here the archive
+  root and the year and month directories -- with the default 0755, so the
+  meeting-title directory names beneath them were listable by other local
+  users until something tightened the root. Levels are now created one at a
+  time and each is chmod'ed; ancestors that already existed are untouched.
+  Year and month directories from earlier releases are tightened as notes
+  are written into them.
+- The OAuth redirect listener now serves exactly one request on /callback,
+  as SECURITY.md says. A second request -- a reload, or another page on this
+  machine -- overwrote the captured code; the SDK's state and PKCE checks
+  meant that could break a login but never hijack one. The redirect's RFC
+  9207 iss parameter is now passed to the SDK as well: Granola's
+  authorization server does not advertise it yet, and the SDK rejects a
+  redirect without iss once a server does.
+- Corrected .env.example, which said a relative GRANOLA_ARCHIVE_DIR resolves
+  from the repo root. It resolves against the directory you run from, while
+  .env is found by walking up from the package, so a scheduled run started
+  elsewhere reads the right .env yet quietly backfills a second, unclaimed
+  archive -- which the account guard cannot catch. Use an absolute path for
+  scheduled runs; the behavior is unchanged, since changing it would move
+  existing archives. The README also gained verify's --source and --deep.
+- CI now tests Python 3.13 as well as 3.14. requires-python allows 3.13, but
+  without a pin uv chose the newest interpreter, so the floor was never
+  tested. A lint job runs ruff with its rule selection pinned to real errors
+  -- undefined names, unused imports, syntax -- so a Dependabot bump of ruff
+  cannot fail CI with new style rules; it found three unused imports.
 - Fixed CLI tests that leaked fake-client state into each other. They
   assigned _FakeMCPClient.folders and .listing directly, so a value outlived
   the test that set it: test_allow_account_change_reclaims never set a
@@ -150,6 +150,9 @@ Changelog
   survives in the element build_raw archives, so mcp_parse.creator_email reads
   it back. An MCP archive whose elements name no creator stays unclaimed until
   the next sync.
+- Upgraded httpx2 and httpcore2 from 2.9.1 to 2.12.0, clearing six
+  advisories (three high, three medium) published after v0.4.0's audit
+  passed. Both are transitive, pulled in by the mcp SDK's own HTTP stack.
 
 0.4.0
 -----
