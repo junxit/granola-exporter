@@ -12,6 +12,11 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- CI now tests Python 3.13 as well as 3.14. requires-python allows 3.13, but
+  without a pin uv chose the newest interpreter, so the floor was never
+  tested. A lint job runs ruff with its rule selection pinned to real errors
+  -- undefined names, unused imports, syntax -- so a Dependabot bump of ruff
+  cannot fail CI with new style rules; it found three unused imports.
 - Corrected .env.example, which said a relative GRANOLA_ARCHIVE_DIR resolves
   from the repo root. It resolves against the directory you run from, while
   .env is found by walking up from the package, so a scheduled run started

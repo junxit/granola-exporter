@@ -7,7 +7,7 @@ runs offline with no SDK, no network and no credentials.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 

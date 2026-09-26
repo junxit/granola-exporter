@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
-    SOURCE_MCP,
     SOURCE_PUBLIC_API,
     Note,
     is_valid_archive_key,

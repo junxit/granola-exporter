@@ -21,6 +21,7 @@ granola-export = "granola_exporter.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.16.9",
 ]
 
 [build-system]
@@ -32,3 +33,9 @@ packages = ["src/granola_exporter"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+# Pinned rather than left to ruff's defaults, which widened sharply by 0.16.
+# This gate is for real errors -- undefined names, unused imports, syntax --
+# and a Dependabot bump of ruff must not be able to fail CI with style rules.
+select = ["E4", "E7", "E9", "F"]

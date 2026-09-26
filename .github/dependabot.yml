@@ -1,8 +1,9 @@
 version: 2
 updates:
-  # Python. The lockfile carries 3 direct dependencies and 37 transitive ones,
-  # most of them fast-moving (pydantic, starlette, uvicorn, opentelemetry), so
-  # minor and patch bumps are batched into a single weekly pull request.
+  # Python. The lockfile carries a handful of direct dependencies and dozens
+  # of transitive ones, most of them fast-moving (pydantic, starlette,
+  # uvicorn, opentelemetry), so minor and patch bumps are batched into a
+  # single weekly pull request.
   #
   # Major bumps are deliberately left ungrouped. Grouping is all-or-nothing: one
   # broken package blocks everything batched with it. That is an acceptable
