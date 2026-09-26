@@ -12,6 +12,13 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- Corrected .env.example, which said a relative GRANOLA_ARCHIVE_DIR resolves
+  from the repo root. It resolves against the directory you run from, while
+  .env is found by walking up from the package, so a scheduled run started
+  elsewhere reads the right .env yet quietly backfills a second, unclaimed
+  archive -- which the account guard cannot catch. Use an absolute path for
+  scheduled runs; the behavior is unchanged, since changing it would move
+  existing archives. The README also gained verify's --source and --deep.
 - A public API detail payload whose id differs from the one requested is
   counted as failed rather than archived. The id builds the archive path: a
   malformed one raised UnsafeArchivePathError and aborted the whole run, and
