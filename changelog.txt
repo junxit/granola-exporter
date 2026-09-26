@@ -12,6 +12,10 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- The version is read from the installed package, so pyproject.toml is its
+  one source. The hand-kept copy in __init__.py sat at 0.3.0 through 0.4.0
+  and 0.5.0, and both backends send it as the User-Agent, so every request
+  since 0.4.0 announced the wrong version. Added granola-export --version.
 - logout --all now removes the default credentials even when
   GRANOLA_MCP_PROFILE is set, as the README suggests doing per Terminal tab.
   The default slot was resolved through that variable, so it became the

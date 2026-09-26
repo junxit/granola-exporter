@@ -140,7 +140,8 @@ uv run granola-export sync --source mcp --since 2025-01-01
 | `verify` | Check on-disk integrity, provenance and duplicates; reconcile upstream |
 
 Every command also takes `--profile NAME` — see
-[Multiple accounts](#multiple-accounts).
+[Multiple accounts](#multiple-accounts). `granola-export --version` prints the
+installed version.
 
 `doctor` and `sync` **never** open a browser: only `login` does. A scheduled
 sync that silently blocked waiting for a browser would be a backup that had
