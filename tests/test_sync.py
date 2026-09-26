@@ -168,6 +168,27 @@ def test_index_survives_an_api_error_midway(tmp_path, note_payload, stub_payload
     assert note_payload["id"] in Archive(tmp_path).load_index()
 
 
+def test_index_survives_any_exception_midway(tmp_path, note_payload, stub_payload):
+    """The save-before-raise promise covers every exception, not only API ones."""
+    second = dict(stub_payload, id="not_2d3tmYTlCICgjy")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/notes"):
+            return httpx.Response(
+                200,
+                json={"notes": [stub_payload, second], "hasMore": False, "cursor": None},
+            )
+        if request.url.path.endswith(second["id"]):
+            raise RuntimeError("an unexpected failure")
+        return httpx.Response(200, json=note_payload)
+
+    archive = Archive(tmp_path)
+    with pytest.raises(RuntimeError):
+        sync_public_api(archive, _client(handle))
+
+    assert note_payload["id"] in Archive(tmp_path).load_index()
+
+
 def test_full_run_flags_notes_missing_upstream(tmp_path, note_payload, stub_payload):
     """A note that disappears upstream is flagged, never deleted."""
     archive = Archive(tmp_path)

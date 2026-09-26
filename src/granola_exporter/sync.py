@@ -173,6 +173,9 @@ def sync_public_api(
 ) -> SyncCounts:
     """Fetch new and changed meetings from the public API into the archive.
 
+    Whatever exception escapes, the index is saved first, so the notes this
+    pass already wrote are never forgotten and refetched.
+
     Args:
         archive: The destination archive.
         client: A ready-to-use public API client.
@@ -182,9 +185,8 @@ def sync_public_api(
         The per-note tally for this pass.
 
     Raises:
-        GranolaAPIError: If the API fails unrecoverably. The index is saved
-            first, so partial progress survives.
-        KeyboardInterrupt: If the user interrupts. The index is saved first.
+        GranolaAPIError: If the API fails unrecoverably.
+        KeyboardInterrupt: If the user interrupts.
     """
     opts = opts or SyncOptions()
     index = archive.load_index()
@@ -271,10 +273,9 @@ def sync_public_api(
             counts.record(result.status)
             if opts.verbose:
                 print(f"  {result.status:9} {note.display_title}")
-    except GranolaAPIError:
-        archive.save_index()
-        raise
-    except KeyboardInterrupt:
+    except BaseException:
+        # Not only API errors: anything unexpected would otherwise leave
+        # notes on disk that the index has never heard of.
         archive.save_index()
         raise
 
@@ -496,6 +497,11 @@ def sync_mcp(
 
     Returns:
         The per-note tally for this pass.
+
+    Raises:
+        MCPResponseFormatError: If a response no longer has the expected
+            shape. Drift aborts the pass, but anything already written is
+            indexed first.
     """
     opts = opts or SyncOptions()
     today = today or datetime.now().astimezone().date()
@@ -565,9 +571,16 @@ def sync_mcp(
 
     pending.extend(_refresh_batch(archive, index, meetings, opts.refresh_batch))
 
-    _write_mcp_meetings(
-        archive, client, pending, folders, counts, opts, server_url
-    )
+    try:
+        _write_mcp_meetings(
+            archive, client, pending, folders, counts, opts, server_url
+        )
+    except BaseException:
+        # Drift is still loud -- the error propagates -- but the notes this
+        # pass already wrote are on disk, and an index that forgot them would
+        # refetch every one, rate-limited transcripts included.
+        archive.save_index()
+        raise
 
     archive.save_index()
     archive.save_source_state(

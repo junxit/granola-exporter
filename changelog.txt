@@ -3,6 +3,15 @@ Changelog
 
 0.6.0
 -----
+- An MCP sync that hits a malformed response partway through no longer
+  forgets what it had already archived. MCPResponseFormatError aborts the
+  pass on purpose -- drift is loud -- but it is not an MCPError, so nothing
+  caught it: every note written earlier in the run, rate-limited transcripts
+  included, was missing from index.json and refetched next time, and the
+  error surfaced as a raw traceback. Both sync functions now save the index
+  on any exception before re-raising; sync reports drift as an ERROR line and
+  verify --deep as a failed upstream check. A sync that never started --
+  attempted while logged out, say -- no longer leaves an empty archive behind.
 - Fixed CLI tests that leaked fake-client state into each other. They
   assigned _FakeMCPClient.folders and .listing directly, so a value outlived
   the test that set it: test_allow_account_change_reclaims never set a

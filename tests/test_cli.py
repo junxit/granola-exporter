@@ -424,6 +424,46 @@ def test_verify_deep_reports_no_gap_on_an_empty_archive(capsys, tmp_path, monkey
     assert "gap                : none" in out
 
 
+# -- failures are reported, not dumped ----------------------------------------
+
+
+_DRIFTED_LISTING = "Sorry, I could not find anything."
+
+
+def test_sync_reports_parser_drift_as_an_error(tmp_path, monkeypatch):
+    """Regression: drift aborted with a raw traceback instead of an ERROR line."""
+    import granola_exporter.mcp_api as api
+
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "listing", _DRIFTED_LISTING)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["sync", "--source", "mcp"])
+    assert "ERROR" in str(exc.value)
+    assert "list_meetings" in str(exc.value)
+
+
+def test_verify_deep_reports_parser_drift(tmp_path, monkeypatch, capsys):
+    """A reconcile that cannot read the listing says so rather than crashing."""
+    import granola_exporter.mcp_api as api
+
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "listing", _DRIFTED_LISTING)
+
+    assert main(["verify", "--source", "mcp", "--deep"]) == 0
+    out = capsys.readouterr().out
+    assert "upstream check" in out and "FAILED" in out
+
+
+def test_a_sync_that_never_started_writes_nothing(tmp_path):
+    """Being logged out must not leave an empty archive behind."""
+    with pytest.raises(SystemExit):
+        main(["sync", "--source", "mcp"])
+    assert not (tmp_path / "archive").exists()
+
+
 # -- account identity guard -------------------------------------------------
 
 

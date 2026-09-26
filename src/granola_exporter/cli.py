@@ -587,11 +587,13 @@ def _sync_via_mcp(
         The per-note tally.
 
     Raises:
-        SystemExit: If the MCP is not authorized, or the sync fails. The
-            message names the remedy rather than dumping a stack trace.
+        SystemExit: If the MCP is not authorized, the sync fails, or a
+            response no longer parses. The message names the problem rather
+            than dumping a stack trace.
     """
     from .mcp_api import MCPClient, MCPError
     from .mcp_auth import MCPAuthError
+    from .mcp_parse import MCPResponseFormatError
 
     try:
         # allow_login=False on purpose: a scheduled sync that silently blocks
@@ -609,11 +611,10 @@ def _sync_via_mcp(
             if note:
                 print(f"  NOTE: {note}", file=sys.stderr)
             return sync_mcp(archive, client, opts, server_url=config.mcp_url)
-    except MCPAuthError as exc:
-        archive.save_index()
-        raise SystemExit(f"ERROR: {exc}")
-    except MCPError as exc:
-        archive.save_index()
+    except (MCPAuthError, MCPError, MCPResponseFormatError) as exc:
+        # sync_mcp has already indexed whatever it wrote. Saving again here
+        # would create an empty archive for a sync that never started -- one
+        # attempted while logged out, say.
         raise SystemExit(f"ERROR: {exc}")
 
 
@@ -739,6 +740,7 @@ def _verify_against_mcp(
     """
     from .mcp_api import MCPClient, MCPError
     from .mcp_auth import MCPAuthError
+    from .mcp_parse import MCPResponseFormatError
 
     storage = _mcp_storage(config)
     if not storage.status().present:
@@ -788,6 +790,10 @@ def _verify_against_mcp(
                 print("  gap                : none — archive covers every MCP meeting")
     except (MCPAuthError, MCPError) as exc:
         print(f"  upstream check     : skipped ({exc})")
+    except MCPResponseFormatError as exc:
+        # Not "skipped": the listing came back and could not be read. That is
+        # drift, and a gap check built on it would not be trustworthy.
+        print(f"  upstream check     : FAILED — unrecognized MCP response: {exc}")
 
 
 def main(argv: list[str] | None = None) -> int:
