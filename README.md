@@ -122,6 +122,9 @@ uv run granola-export sync --full
 # Integrity check + reconcile against the API
 uv run granola-export verify
 
+# A full per-meeting gap check against the MCP
+uv run granola-export verify --source mcp --deep
+
 # Force the MCP backend even when a key exists
 uv run granola-export sync --source mcp
 
@@ -133,11 +136,11 @@ uv run granola-export sync --source mcp --since 2025-01-01
 
 | Command | Purpose |
 | --- | --- |
-| `doctor` | Validate credentials, backend reachability and archive location |
+| `doctor` | Validate credentials, backend reachability and archive location (`--source`) |
 | `login` | Authorize the Granola MCP in a browser (`--no-browser`) |
 | `logout` | Remove the stored MCP credentials (`--all`) |
 | `sync` | Fetch new and changed meetings (`--full`, `-v`, `--source`, `--since`, `--window`, `--refresh-batch`, `--allow-account-change`) |
-| `verify` | Check on-disk integrity, provenance and duplicates; reconcile upstream |
+| `verify` | Check on-disk integrity, provenance and duplicates; reconcile upstream (`--source`, `--deep`) |
 
 Every command also takes `--profile NAME` — see
 [Multiple accounts](#multiple-accounts). `granola-export --version` prints the
@@ -315,7 +318,7 @@ session pointed somewhere else.
 | --- | --- | --- |
 | `GRANOLA_API_KEY` | — | Public API key (`grn_…`) for the default profile. Needed for the public API backend. |
 | `GRANOLA_API_KEY_<PROFILE>` | — | Public API key for a named profile, e.g. `GRANOLA_API_KEY_WORK`. A profile never falls back to `GRANOLA_API_KEY`. |
-| `GRANOLA_ARCHIVE_DIR` | `./archive` | Where the archive is written |
+| `GRANOLA_ARCHIVE_DIR` | `./archive` | Where the archive is written. A relative path resolves against the directory you run from, not the repo — use an absolute one for scheduled runs |
 | `GRANOLA_SYNC_SOURCE` | `auto` | `auto`, `public-api` or `mcp` |
 | `GRANOLA_MCP_URL` | `https://mcp.granola.ai/mcp` | MCP endpoint |
 | `GRANOLA_MCP_PROFILE` | — | Credential profile; overridden by `--profile` |
