@@ -41,7 +41,7 @@ jobs:
       # osv-scanner reads uv.lock natively and queries the OSV database.
       # Fails the job if any pinned dependency has a known advisory.
       - name: Scan uv.lock for known vulnerabilities
-        uses: google/osv-scanner-action/osv-scanner-action@v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@v2.5.1
         with:
           scan-args: |-
             --lockfile=uv.lock
