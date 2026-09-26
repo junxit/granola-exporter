@@ -310,16 +310,227 @@ def test_transcript_is_never_refetched(tmp_path):
     assert fake.count("get_meeting_transcript") == 1
 
 
-def test_rolling_refresh_is_bounded(tmp_path):
-    """Edits to old notes are amortised, not chased on every run."""
-    meetings = [(_uuid(i), f"Meeting {i}", date(2026, 8, 1)) for i in range(1, 6)]
-    fake = FakeMCP(meetings)
+def _requested(fake: FakeMCP) -> list[str]:
+    """Every meeting id sent to get_meetings, in order.
+
+    Args:
+        fake: The backend.
+
+    Returns:
+        The ids, repeats included.
+    """
+    return [i for name, args in fake.calls if name == "get_meetings" for i in args]
+
+
+def _january(count: int) -> list[tuple[str, str, date]]:
+    """Build meetings far older than any trailing window.
+
+    Args:
+        count: How many to build.
+
+    Returns:
+        ``(uuid, title, date)`` tuples on consecutive January days.
+    """
+    return [(_uuid(i), f"Meeting {i}", date(2026, 1, 10 + i)) for i in range(1, count + 1)]
+
+
+def test_rolling_refresh_reaches_notes_older_than_the_window(tmp_path):
+    """A plain sync re-reads a bounded number of old notes.
+
+    Regression: only notes in this run's listing were eligible, and a plain
+    sync lists only the trailing window, so the refresh never reached an old
+    note -- the test standing here used in-window meetings, and passed with
+    the refresh switched off.
+    """
+    fake = FakeMCP(_january(5))
+    opts = SyncOptions(since=date(2026, 1, 1), refresh_batch=2)
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    fake.calls.clear()
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert sorted(_requested(fake)) == [_uuid(1), _uuid(2)], "the two least recently checked"
+    assert counts.failed == 0
+
+
+def test_refresh_never_requeues_a_note_already_being_read(tmp_path):
+    """Regression: refresh picks were not checked against the pending queue.
+
+    Every in-window note is re-read anyway, so the picks duplicated them:
+    fetched twice, and counted twice in the run summary.
+    """
+    fake = FakeMCP(_meetings(5))
     opts = SyncOptions(since=date(2026, 7, 1), refresh_batch=2)
     sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
 
-    before = fake.count("get_meetings")
+    fake.calls.clear()
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert sorted(_requested(fake)) == [_uuid(i) for i in range(1, 6)]
+    assert counts.unchanged == counts.detail_fetches == 5
+
+
+def test_rolling_refresh_rotates(tmp_path, monkeypatch):
+    """Each run moves on to the next least recently checked notes.
+
+    Regression: an unchanged re-read never recorded the check, so the same
+    notes were picked on every run, --full included.
+    """
+    ticks = iter(range(1_000_000))
+    monkeypatch.setattr(
+        "granola_exporter.sync._now_iso",
+        lambda: f"2026-08-06T00:00:00.{next(ticks):06d}+00:00",
+    )
+    fake = FakeMCP(_january(4))
+    opts = SyncOptions(since=date(2026, 1, 1), refresh_batch=2)
     sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
-    assert fake.count("get_meetings") > before, "some notes are refreshed"
+
+    picked = []
+    for _ in range(2):
+        fake.calls.clear()
+        sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+        picked.append(set(_requested(fake)))
+
+    assert [len(p) for p in picked] == [2, 2]
+    assert not picked[0] & picked[1], "the second run must move on"
+
+
+def test_old_missing_transcripts_are_retried_by_a_plain_sync(tmp_path):
+    """Regression: a throttled backfill's older notes never got transcripts.
+
+    A plain re-run lists only the trailing window, and --full skipped any
+    note whose listing had not changed without asking whether it had a
+    transcript -- yet the README promised that re-running sync retries them.
+    """
+
+    class Throttled(FakeMCP):
+        throttle = True
+
+        def get_meeting_transcript(self, meeting_id):
+            """Throttle until the flag is cleared, then serve normally."""
+            if self.throttle:
+                self.calls.append(("get_meeting_transcript", (meeting_id,)))
+                raise RuntimeError("Rate limit exceeded")
+            return super().get_meeting_transcript(meeting_id)
+
+    fake = Throttled([(_uuid(i), f"Old {i}", date(2026, 1, 15)) for i in range(1, 7)])
+    opts = SyncOptions(since=date(2026, 1, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    fake.throttle = False
+    fake.calls.clear()
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meeting_transcript") == 6, "all six are retried"
+    assert counts.updated == 6
+    assert all(e["has_transcript"] for e in Archive(tmp_path).load_index().values())
+
+
+def test_a_note_gone_upstream_is_never_requested(tmp_path):
+    """A refresh re-lists its candidates' windows and only reads what came back.
+
+    How get_meetings answers for a deleted meeting is unknown, and some
+    plausible replies would abort every run, so an unlisted id is never sent.
+    """
+    fake = FakeMCP([(_uuid(1), "Gone soon", date(2026, 1, 15)), (_uuid(2), "Stays", date(2026, 1, 20))])
+    opts = SyncOptions(since=date(2026, 1, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    del fake.meetings[_uuid(1)]
+    fake.calls.clear()
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert _uuid(1) not in _requested(fake)
+    assert counts.failed == counts.refresh_failed == 0
+    entry = Archive(tmp_path).load_index()[f"mcp_{_uuid(1)}"]
+    assert entry["mcp"]["refresh_attempted_at"], "stamped, so the queue moves on"
+
+
+def test_a_failed_refresh_does_not_fail_the_run(tmp_path):
+    """Re-reading an archived note is optional work; it warns instead."""
+    fake = FailsBatchesWith([(_uuid(1), "Old", date(2026, 1, 15))], bad={_uuid(1)}, failures=0)
+    opts = SyncOptions(since=date(2026, 1, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    fake.failures = None  # every batch holding it fails from now on
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert counts.failed == 0, "an optional re-read must not fail a scheduled sync"
+    assert counts.refresh_failed == 1
+    assert any("re-read" in w for w in counts.warnings())
+    assert Archive(tmp_path).source_state(SOURCE_MCP)["retry_from"] is None
+
+
+def test_refresh_candidates_are_ranked():
+    """Missing transcripts first, then the least recently checked."""
+    from granola_exporter.sync import TRANSCRIPT_RETRY_LIMIT, _old_note_candidates
+
+    def key(n: int) -> str:
+        return f"mcp_{_uuid(n)}"
+
+    fetched = {"transcript_fetched_at": "2026-01-01T00:00:00+00:00"}
+    index = {
+        key(1): {"mcp": {**fetched, "detail_fetched_at": "2026-03-01T00:00:00+00:00"}},
+        key(2): {"mcp": {**fetched, "detail_fetched_at": "2026-05-01T00:00:00+00:00"}},
+        key(3): {"mcp": {}},
+        key(4): {"mcp": {"transcript_attempted_at": "2026-06-01T00:00:00+00:00"}},
+        key(5): {
+            "mcp": {
+                "transcript_failures": TRANSCRIPT_RETRY_LIMIT,
+                "detail_fetched_at": "2026-04-01T00:00:00+00:00",
+            }
+        },
+        key(6): {"mcp": {}, "upstream_missing": True},
+        key(7): {"mcp": {}},
+        "not_1d3tmYTlCICgjy": {},
+    }
+
+    picked = _old_note_candidates(index, {_uuid(7)}, limit=10)
+
+    # 3 and 4 still lack transcripts (never tried, then tried); 5 has given
+    # up on one and waits its turn with the rest by last check: 1, 5, 2.
+    assert picked == [key(3), key(4), key(1), key(5), key(2)]
+
+
+def test_refresh_order_compares_instants_not_strings():
+    """Stamps carry the local offset, so strings misorder across a DST change."""
+    from granola_exporter.sync import _old_note_candidates
+
+    fetched = {"transcript_fetched_at": "2026-01-01T00:00:00+00:00"}
+    index = {
+        # 01:50 CDT is 06:50 UTC; after the fall-back, 01:10 CST is 07:10 UTC.
+        f"mcp_{_uuid(1)}": {"mcp": {**fetched, "detail_fetched_at": "2026-11-01T01:10:00-06:00"}},
+        f"mcp_{_uuid(2)}": {"mcp": {**fetched, "detail_fetched_at": "2026-11-01T01:50:00-05:00"}},
+    }
+
+    assert _old_note_candidates(index, set(), limit=1) == [f"mcp_{_uuid(2)}"]
+
+
+def test_a_transcript_for_another_meeting_is_rejected(tmp_path):
+    """Never file one meeting's words under another's."""
+
+    class Crossed(FakeMCP):
+        def get_meeting_transcript(self, meeting_id):
+            """Answer with a transcript that belongs to a different meeting."""
+            return dict(super().get_meeting_transcript(meeting_id), id=_uuid(99))
+
+    fake = Crossed([(_uuid(1), "Yoghurt sync", date(2026, 8, 1))])
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 1)), today=TODAY)
+
+    assert counts.transcripts_failed == 1
+    assert Archive(tmp_path).load_index()[f"mcp_{_uuid(1)}"]["has_transcript"] is False
+
+
+def test_an_empty_transcript_is_not_refetched(tmp_path):
+    """An empty transcript was still fetched; asking again wastes the scarcest budget."""
+    fake = FakeMCP([(_uuid(1), "Silent", date(2026, 8, 1))], transcripts={_uuid(1): ""})
+    opts = SyncOptions(since=date(2026, 7, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meeting_transcript") == 1
+    assert counts.updated == 0
 
 
 # -- batching and windowing ------------------------------------------------
@@ -425,7 +636,8 @@ def test_failed_batch_is_retried_by_the_next_plain_sync(tmp_path):
     fake = FailsBatchesWith(
         [(_uuid(1), "Old meeting", date(2026, 1, 15))], bad={_uuid(1)}, failures=1
     )
-    opts = SyncOptions(since=date(2026, 1, 1))
+    # The rolling refresh re-lists old notes too; keep it out of the count.
+    opts = SyncOptions(since=date(2026, 1, 1), refresh_batch=0)
 
     first = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
     assert first.failed == 1

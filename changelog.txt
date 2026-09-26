@@ -12,6 +12,28 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- Older MCP notes are revisited by a plain sync, as the README always said.
+  A plain sync lists only the trailing window, so a transcript missing after
+  a throttled backfill was never retried there, and --full did not help: it
+  skipped any note whose listing had not changed without asking whether it
+  had a transcript. The rolling refresh could not reach old notes either --
+  it only picked from this run's listing, so on a plain sync it re-queued
+  notes already being re-read, fetching and counting them twice -- and it
+  never rotated, because an unchanged re-read never recorded the check.
+  Each run now also re-reads up to --refresh-batch archived notes (default
+  30) from the whole archive: those still missing a transcript first, then
+  the least recently checked, compared as instants so a daylight-saving
+  change cannot misorder them. They are reached by re-listing the weeks they
+  fall in -- one or two extra listing calls -- rather than by sending
+  get_meetings ids nobody listed, whose answer for a deleted meeting is
+  unknown. These re-reads run after the real work and warn rather than fail
+  the run. A note whose transcript has failed three times for a reason other
+  than throttling stops jumping the queue. The README's "sync --full catches
+  it now" was also wrong for a regenerated summary, which is not in the
+  listing; it now names --full --refresh-batch N for that.
+- An MCP transcript that comes back for a different meeting than the one
+  requested is rejected rather than archived, and an empty transcript is no
+  longer refetched every time its note is re-read.
 - A failed MCP detail fetch is now retried by the next plain sync. The pass
   recorded scanned_through regardless, so the next run was incremental,
   never listed a failed meeting older than the trailing window again, and

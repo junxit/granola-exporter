@@ -910,7 +910,8 @@ def main(argv: list[str] | None = None) -> int:
         type=_at_least(0),
         default=None,
         metavar="N",
-        help="MCP notes to re-read per run to catch older edits (default: 30)",
+        help="archived MCP notes to re-read per run, missing transcripts "
+        "first, to catch older edits (default: 30; 0 turns it off)",
     )
     sync.add_argument("-v", "--verbose", action="store_true", help="per-note output")
     sync.set_defaults(func=cmd_sync)
