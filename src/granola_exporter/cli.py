@@ -145,6 +145,42 @@ class AccountMismatch(RuntimeError):
     """Raised when a sync would write a different account into an archive."""
 
 
+def _same_account(first: str, second: str) -> bool:
+    """Compare two account emails the way a mail server would.
+
+    The two backends need not agree on case, and a sync refused over
+    ``Oat@`` versus ``oat@`` is a backup that stopped for nothing.
+
+    Args:
+        first: One email.
+        second: The other.
+
+    Returns:
+        ``True`` when they name the same account.
+    """
+    return first.strip().casefold() == second.strip().casefold()
+
+
+def _account_mismatch(incumbent: str, live: str) -> str:
+    """The warning doctor and verify print when the accounts differ.
+
+    One wording for both, so it cannot drift from what sync then does.
+
+    Args:
+        incumbent: The account the archive holds, ``""`` if unclaimed.
+        live: The account this run is authorized as, ``""`` if unknown.
+
+    Returns:
+        The warning, or ``""`` when there is nothing to warn about.
+    """
+    if not incumbent or not live or _same_account(incumbent, live):
+        return ""
+    return (
+        f"archive holds {incumbent} but you are authorized as {live} "
+        "— sync will refuse without --allow-account-change"
+    )
+
+
 def _check_account(
     archive: Archive,
     current: str,
@@ -181,7 +217,7 @@ def _check_account(
         return "could not identify the syncing account — skipping the check"
 
     incumbent = archive.account_email or archive.infer_account_email()
-    if not incumbent or incumbent == current:
+    if not incumbent or _same_account(incumbent, current):
         archive.claim_account(current, _effective_source(config))
         return ""
 
@@ -330,11 +366,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # diagnostic. `sync` is where this becomes a hard stop.
     incumbent = archive.account_email or archive.infer_account_email()
     print(f"  account     : {incumbent or '(unclaimed)'}")
-    if incumbent and live_email and incumbent != live_email:
-        print(
-            f"  WARNING     : archive holds {incumbent} but you are authorized "
-            f"as {live_email} — sync will refuse without --allow-account-change"
-        )
+    if warning := _account_mismatch(incumbent, live_email):
+        print(f"  WARNING     : {warning}")
     print(f"  watermark   : {archive.watermark or '(none — next sync is a backfill)'}")
 
     mcp_state = archive.source_state(SOURCE_MCP)
@@ -669,7 +702,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     print(f"Verifying {config.archive_dir}")
     print(f"  indexed notes      : {len(index)}")
-    print(f"  account            : {archive.account_email or '(unclaimed)'}")
+    # Recorded or inferred, as doctor does: an archive from before accounts
+    # were recorded still says whose it is.
+    incumbent = archive.account_email or archive.infer_account_email()
+    print(f"  account            : {incumbent or '(unclaimed)'}")
 
     missing_dirs = []
     missing_raw = []
@@ -731,6 +767,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if _effective_source(config) == "public-api" and config.api_key:
         try:
             with PublicAPIClient(config.api_key) as client:
+                # A warning, never a failure -- and the very check sync's
+                # guard makes, so it predicts a refusal exactly.
+                if warning := _account_mismatch(incumbent, client.account_email()):
+                    print(f"  WARNING            : {warning}")
                 upstream = {
                     str(s.get("id")) for s in client.iter_notes() if s.get("id")
                 }
@@ -745,7 +785,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
         except GranolaAPIError as exc:
             print(f"  upstream check     : skipped ({exc})")
     elif _effective_source(config) == "mcp":
-        _verify_against_mcp(archive, config, index, folders, deep=bool(args.deep))
+        _verify_against_mcp(
+            archive, config, index, folders, deep=bool(args.deep), incumbent=incumbent
+        )
 
     return 1 if (missing_dirs or missing_raw or duplicates) else 0
 
@@ -757,12 +799,14 @@ def _verify_against_mcp(
     archived_folders: dict[str, int],
     *,
     deep: bool,
+    incumbent: str = "",
 ) -> None:
     """Reconcile the archive against the MCP.
 
-    The cheap check costs one request: folder note counts, compared by folder
-    *name*, which is the only key the two backends share. ``--deep`` pays for a
-    full windowed listing scan and reports a real per-meeting gap.
+    The cheap check costs two requests: the authorized account, compared
+    with the archive's, and folder note counts, compared by folder *name* --
+    the only key the two backends share. ``--deep`` pays for a full windowed
+    listing scan and reports a real per-meeting gap.
 
     Args:
         archive: The archive being verified.
@@ -770,6 +814,7 @@ def _verify_against_mcp(
         index: The loaded index.
         archived_folders: Archived note counts per folder name.
         deep: Whether to run the full scan.
+        incumbent: The account the archive holds, ``""`` if unclaimed.
     """
     from .mcp_api import MCPClient, MCPError
     from .mcp_auth import MCPAuthError
@@ -784,6 +829,11 @@ def _verify_against_mcp(
         with MCPClient(
             config.mcp_url, token_path=_token_path(config), allow_login=False
         ) as client:
+            # A warning, never a failure: a diagnostic that refuses to run is
+            # not a diagnostic. sync is where a mismatch stops things.
+            live = str(client.account_info().get("email") or "")
+            if warning := _account_mismatch(incumbent, live):
+                print(f"  WARNING            : {warning}")
             print("  folder counts (MCP vs archived, joined by name):")
             for folder in client.list_folders():
                 name = str(folder.get("title") or folder.get("name") or "")
@@ -933,7 +983,7 @@ def main(argv: list[str] | None = None) -> int:
         "--deep",
         action="store_true",
         help="scan every MCP listing window for a true per-meeting gap "
-        "(costs one request per 31 days; the default check costs one)",
+        "(costs one request per 31 days; the default check costs two)",
     )
     verify.set_defaults(func=cmd_verify)
 

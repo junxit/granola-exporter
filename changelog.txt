@@ -12,6 +12,13 @@ Changelog
   on any exception before re-raising; sync reports drift as an ERROR line and
   verify --deep as a failed upstream check. A sync that never started --
   attempted while logged out, say -- no longer leaves an empty archive behind.
+- verify now reports an account mismatch as a warning, as 0.5.0 documented
+  but never did: it printed only the recorded account, without even the
+  inference doctor makes for an archive from before accounts were recorded.
+  Both commands now share one wording, and verify's cheap MCP check costs two
+  requests rather than one.
+- Account emails are compared case-insensitively, so a sync is no longer
+  refused because two backends capitalize the same address differently.
 - The version is read from the installed package, so pyproject.toml is its
   one source. The hand-kept copy in __init__.py sat at 0.3.0 through 0.4.0
   and 0.5.0, and both backends send it as the User-Agent, so every request

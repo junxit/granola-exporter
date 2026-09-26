@@ -684,6 +684,61 @@ def test_unclaimed_empty_archive_is_adopted(tmp_path, monkeypatch):
     assert Archive(tmp_path / "archive").account_email == "oat@granola.ai"
 
 
+def test_verify_warns_on_a_mismatch_without_failing(tmp_path, monkeypatch, capsys):
+    """Regression: 0.5.0 documented this warning, but verify never printed it."""
+    import granola_exporter.mcp_api as api
+
+    _seed_archive(tmp_path, "work@company.com")
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "personal@gmail.com")
+
+    assert main(["verify", "--source", "mcp"]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "work@company.com" in out and "personal@gmail.com" in out
+
+
+def test_verify_warns_on_a_public_api_mismatch(tmp_path, monkeypatch, capsys, stub_payload):
+    """The public API has no account endpoint; the note owner stands in."""
+    import httpx
+
+    from granola_exporter.public_api import PublicAPIClient, RateLimiter
+
+    theirs = dict(stub_payload, owner={"name": "P", "email": "personal@gmail.com"})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"notes": [theirs], "hasMore": False})
+
+    def client(api_key: str, *args, **kwargs) -> PublicAPIClient:
+        real = PublicAPIClient(api_key, base_url="https://api.test/v1")
+        real._client = httpx.Client(transport=httpx.MockTransport(handler))
+        real._limiter = RateLimiter(capacity=1000, rate=1e6)
+        return real
+
+    _seed_archive(tmp_path, "work@company.com")
+    monkeypatch.setenv("GRANOLA_API_KEY", "grn_test")
+    monkeypatch.setattr("granola_exporter.cli.PublicAPIClient", client)
+
+    assert main(["verify"]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "personal@gmail.com" in out
+
+
+def test_an_email_differing_only_in_case_is_the_same_account(tmp_path, monkeypatch, capsys):
+    """Two backends need not agree on case; that is not an account change."""
+    import granola_exporter.mcp_api as api
+
+    _seed_archive(tmp_path, "Oat@Granola.ai")
+    _authorize(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MCPClient", _FakeMCPClient)
+    monkeypatch.setattr(_FakeMCPClient, "email", "oat@granola.ai")
+    monkeypatch.setattr(_FakeMCPClient, "listing", _EMPTY_LISTING)
+
+    assert main(["sync", "--source", "mcp"]) == 0
+    assert "--allow-account-change" not in capsys.readouterr().err
+
+
 def test_doctor_warns_on_a_mismatch_without_failing(tmp_path, monkeypatch, capsys):
     """A diagnostic that refuses to run is not a diagnostic."""
     import granola_exporter.mcp_api as api
