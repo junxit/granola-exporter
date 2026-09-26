@@ -510,7 +510,13 @@ report a vulnerability.
 
 ```bash
 uv run pytest
+uv run ruff check
 ```
+
+CI runs both on every push and pull request, testing on Python 3.13 — the
+oldest `requires-python` allows — and 3.14. Ruff's rule selection is pinned in
+`pyproject.toml` to real errors (undefined names, unused imports, syntax), so
+a ruff upgrade cannot change what the gate checks.
 
 Tests run fully offline — no API key, no network, no browser and no MCP server.
 The public API is driven through `httpx.MockTransport`; the MCP backend through

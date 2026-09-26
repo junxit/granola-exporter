@@ -28,7 +28,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from . import __version__
-from .models import SOURCE_MCP, SOURCE_PUBLIC_API
+from .models import SOURCE_MCP
 from .public_api import GranolaAPIError, PublicAPIClient
 from .store import Archive
 from .sync import SyncOptions, scan_mcp_meeting_ids, sync_mcp, sync_public_api
