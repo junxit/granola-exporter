@@ -676,6 +676,17 @@ def sync_mcp(
         archive.save_index()
         raise
 
+    # Only a complete, unbounded scan can say a meeting is gone: --since
+    # covers part of the history, and a truncated window may simply have
+    # dropped it.
+    if full and opts.since is None and counts.truncated_windows == 0:
+        newly_missing = _sweep_missing(archive, meetings, today)
+        if newly_missing:
+            print(
+                f"  {len(newly_missing)} archived MCP note(s) no longer listed "
+                "— flagged, not deleted."
+            )
+
     retry_floor = _retry_floor(failed, earliest)
     archive.save_index()
     archive.save_source_state(
@@ -1124,6 +1135,48 @@ def _retry_floor(failed: list[MCPMeeting], fallback: date) -> date | None:
         instant = parse_mcp_date(meeting.date_text).instant
         dates.append(instant.date() if instant else fallback)
     return min(dates) - timedelta(days=1)
+
+
+def _sweep_missing(
+    archive: Archive, listed: dict[str, MCPMeeting], today: date
+) -> list[str]:
+    """Flag MCP notes that a complete scan no longer lists.
+
+    Even an unbounded scan is trusted only between the oldest meeting it
+    listed and yesterday. Older notes are not evidence of anything: the free
+    plan stops serving meetings after 30 days, and history past a long
+    silence is never walked. Undated notes are left alone for the same
+    reason.
+
+    Args:
+        archive: The archive being synced.
+        listed: Every meeting the full scan listed, keyed by id.
+        today: The last day scanned.
+
+    Returns:
+        The archive keys newly flagged.
+    """
+    days = [
+        parsed.instant.date()
+        for meeting in listed.values()
+        if (parsed := parse_mcp_date(meeting.date_text)).instant is not None
+    ]
+    if not days:
+        return []
+    # A day of margin at each end: listings are keyed by local date, and the
+    # index holds UTC instants.
+    first, last = min(days) + timedelta(days=1), today - timedelta(days=1)
+    scope = {
+        key
+        for key, entry in archive.load_index().items()
+        if key.startswith(MCP_KEY_PREFIX)
+        and (created := parse_timestamp(entry.get("created_at"))) is not None
+        and first <= created.date() <= last
+    }
+    seen = {
+        key for meeting in listed.values() if (key := mcp_archive_key(meeting.meeting_id))
+    }
+    return archive.mark_upstream_missing(seen, source=SOURCE_MCP, scope=scope)
 
 
 def _now_iso() -> str:

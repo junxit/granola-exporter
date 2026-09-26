@@ -581,7 +581,11 @@ class Archive:
         return None
 
     def mark_upstream_missing(
-        self, note_ids: set[str], *, source: str | None = None
+        self,
+        note_ids: set[str],
+        *,
+        source: str | None = None,
+        scope: set[str] | None = None,
     ) -> list[str]:
         """Flag archived notes that no longer appear upstream.
 
@@ -593,6 +597,9 @@ class Archive:
             source: When given, only entries from this source are considered.
                 Without it, a full MCP scan would flag every public API note as
                 missing, since the two backends see different id namespaces.
+            scope: When given, only these keys are considered; anything else
+                is neither flagged nor cleared. For a listing that is only
+                trustworthy across part of the history, like the MCP's.
 
         Returns:
             The ids newly flagged as missing.
@@ -601,6 +608,8 @@ class Archive:
         newly_missing = []
         for note_id, entry in index.items():
             if source is not None and self.archived_source(note_id) != source:
+                continue
+            if scope is not None and note_id not in scope:
                 continue
             missing = note_id not in note_ids
             if missing and not entry.get("upstream_missing"):

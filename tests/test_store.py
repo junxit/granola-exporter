@@ -210,6 +210,21 @@ def test_mark_upstream_missing_is_scoped_by_source(tmp_path, note_payload):
     assert archive.load_index()[note_payload["id"]]["upstream_missing"] is False
 
 
+def test_mark_upstream_missing_can_be_scoped_to_some_keys(tmp_path, note_payload):
+    """Outside the scope a note is neither flagged nor cleared."""
+    archive = Archive(tmp_path)
+    inside = Note.from_api(note_payload)
+    outside = Note.from_api(dict(note_payload, id="not_2d3tmYTlCICgjy"))
+    for note in (inside, outside):
+        archive.write_note(note, "# x", None)
+    archive.load_index()[outside.id]["upstream_missing"] = True
+
+    flagged = archive.mark_upstream_missing(set(), scope={inside.id})
+
+    assert flagged == [inside.id]
+    assert archive.load_index()[outside.id]["upstream_missing"] is True, "left alone"
+
+
 def test_uuid_index_maps_uuids_to_keys(tmp_path, note_payload):
     """The uuid index is the join key across both backends."""
     archive = Archive(tmp_path)

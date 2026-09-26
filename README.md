@@ -179,7 +179,11 @@ The archive is **append-mostly by design**:
 
 - A note that disappears upstream is **never deleted locally**. It is flagged
   `upstream_missing` in `index.json`, because surviving upstream deletion is the
-  whole point.
+  whole point, and the flag clears if the note comes back.
+- On the MCP, which cannot prove a listing complete, only an unbounded
+  `sync --full` with no truncated windows sets the flag, and only for meetings
+  dated after the oldest one it still lists. History the MCP no longer serves
+  at all — the free plan stops after 30 days — is not mistaken for deletion.
 - An archived transcript is never removed just because the API stops returning
   one.
 - Renaming a meeting **moves** its directory rather than leaving a duplicate.
