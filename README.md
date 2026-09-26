@@ -359,9 +359,14 @@ API key, use it — this backend exists for accounts that cannot get one.
   does return: a hash of each `<meeting>` element stands in for the stub's
   `updated_at`. That catches retitles, date changes and participant changes.
 - **Edits to older meetings lag.** An incremental run rescans a trailing window
-  (31 days by default, `--window`) and re-reads the 30 least-recently-checked
-  notes (`--refresh-batch`). A summary regenerated long after its meeting is
-  picked up within a few runs, not immediately. `sync --full` catches it now.
+  (31 days by default, `--window`) and also re-reads up to 30 older archived
+  notes (`--refresh-batch`): those still missing a transcript first, then the
+  least recently checked, found by re-listing the weeks they fall in. A summary
+  regenerated long after its meeting is picked up when the rotation reaches it
+  — within archive size ÷ 30 runs — not immediately. `sync --full` catches a
+  retitle, date or participant change at once, since those show in the
+  listing; to re-read every summary now, run `sync --full --refresh-batch N`
+  with N at least the size of your archive.
 - **Completeness is not provable.** With no pagination there is no way to know a
   listing was not truncated. Windows returning 50+ results are bisected and
   rescanned; a single day still at the cap is *reported* as possibly incomplete
@@ -414,12 +419,16 @@ API key, use it — this backend exists for accounts that cannot get one.
 
   A large backfill still will not fetch every transcript in one pass. Notes are
   archived **without** a transcript rather than being skipped, the count is
-  reported as a warning, and **re-running `sync` retries exactly those notes** —
-  an archived transcript is never refetched, so re-runs are cheap and converge.
-  Once three notes in a row have been throttled the pass stops requesting
-  transcripts altogether and says so, rather than spending ~2 minutes per note
-  sleeping against a spent quota; the remaining notes are archived immediately
-  and picked up by the next run. Budget several passes for a first MCP backfill.
+  reported as a warning, and **re-running `sync` retries them** — notes in the
+  trailing window on every run, older ones up to `--refresh-batch` per run,
+  ahead of any other re-read. An archived transcript is never refetched, so
+  re-runs are cheap and converge. A note whose transcript has failed three
+  times for a reason other than throttling — a meeting with no audio, say —
+  stops jumping that queue. Once three notes in a row have been throttled the
+  pass stops requesting transcripts altogether and says so, rather than
+  spending ~2 minutes per note sleeping against a spent quota; the remaining
+  notes are archived immediately and picked up by later runs. Budget several
+  passes for a first MCP backfill.
 
 ### How the two backends join up
 

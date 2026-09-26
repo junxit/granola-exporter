@@ -12,9 +12,9 @@ notes it already archived.
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from .mcp_parse import (
@@ -31,6 +31,7 @@ from .mcp_parse import (
     parse_transcript,
 )
 from .models import (
+    MCP_KEY_PREFIX,
     SOURCE_MCP,
     SOURCE_PUBLIC_API,
     Note,
@@ -58,8 +59,18 @@ SUSPICIOUS_RESULT_COUNT = 50
 MIN_WINDOW_DAYS = 1
 
 # The MCP exposes no update time, so edits to older meetings are found by
-# re-reading a fixed number of the least-recently-checked notes each run.
+# re-reading a fixed number of archived notes each run: those still missing a
+# transcript first, then the least recently checked.
 ROLLING_REFRESH_DEFAULT = 30
+
+# A note whose transcript has failed this many times for a reason other than
+# throttling -- a meeting with no audio, or a plan that serves no transcripts
+# -- stops jumping the refresh queue. Without a limit the queue would never
+# converge, spending the scarcest budget on the same notes run after run.
+TRANSCRIPT_RETRY_LIMIT = 3
+
+# Sorts before any real timestamp: a note never checked goes first.
+_NEVER = datetime.min.replace(tzinfo=UTC)
 
 # Backfill walks backwards until this many consecutive windows come back empty
 # -- about six months. Each extra window is one cheap listing call, while
@@ -73,7 +84,7 @@ EMPTY_WINDOWS_BEFORE_STOP = 6
 # notes in a row have been throttled, the quota is spent and the rest of the
 # pass would only sleep through the same wall, so the run stops asking. This is
 # safe precisely because it is resumable: a note archived without a transcript
-# is retried by the next `sync`, and an archived transcript is never refetched.
+# is retried by later syncs, and an archived transcript is never refetched.
 TRANSCRIPT_GIVEUP_STREAK = 3
 
 
@@ -104,6 +115,7 @@ class SyncCounts:
     transcripts_failed: int = 0
     transcripts_deferred: int = 0
     truncated_windows: int = 0
+    refresh_failed: int = 0
 
     def record(self, status: str) -> None:
         """Increment the counter named by a ``SyncResult`` status.
@@ -158,6 +170,11 @@ class SyncCounts:
             notes.append(
                 f"{self.truncated_windows} window(s) may be incomplete — "
                 "re-run with --full"
+            )
+        if self.refresh_failed:
+            notes.append(
+                f"{self.refresh_failed} older note(s) could not be re-read — "
+                "they come round again on a later sync"
             )
         return notes
 
@@ -505,9 +522,12 @@ def sync_mcp(
        the stub's ``updated_at``, gating the expensive detail call.
     3. The existing content hash still gates the disk write.
 
-    A summary regenerated long after its meeting is caught by the rolling
-    refresh rather than immediately. That is a real regression against the
-    public API, and it is documented rather than hidden.
+    Older notes are revisited by a rolling refresh: each run also re-reads
+    up to ``refresh_batch`` archived notes, missing transcripts first, by
+    re-listing the weeks they fall in. A summary regenerated long after its
+    meeting is therefore caught when the rotation reaches it rather than
+    immediately. That is a real regression against the public API, and it is
+    documented rather than hidden.
 
     Args:
         archive: The destination archive.
@@ -576,38 +596,57 @@ def sync_mcp(
         else {}
     )
 
-    # Decide which meetings need a detail call.
-    pending: list[MCPMeeting] = []
-    for meeting in meetings.values():
-        key = mcp_archive_key(meeting.meeting_id)
-        if key is None:
-            counts.skipped += 1
-            print(
-                f"  SKIP  malformed meeting id from MCP: {meeting.meeting_id!r}",
-                file=sys.stderr,
-            )
-            continue
+    pending, settled = _triage(
+        archive, index, uuid_map, meetings.values(), trailing_start, counts
+    )
+    queued = {m.meeting_id for m in pending}
 
-        # Never downgrade: a note already archived from the public API is
-        # higher fidelity than anything the MCP can produce.
-        owners = uuid_map.get(meeting.meeting_id, [])
-        if any(not owner.startswith("mcp_") for owner in owners):
-            counts.unchanged += 1
-            continue
+    # Re-read a bounded number of archived notes as well, so edits and
+    # throttled transcripts older than the trailing window are still picked
+    # up. Each is stamped now, whether or not it can be reached.
+    candidates = _old_note_candidates(index, queued, opts.refresh_batch)
+    stamp = _now_iso()
+    for key in candidates:
+        _mcp_block(index[key])["refresh_attempted_at"] = stamp
+    wanted = {key.removeprefix(MCP_KEY_PREFIX) for key in candidates}
 
-        entry = index.get(key) or {}
-        stored = (entry.get("mcp") or {}).get("listing_hash")
-        in_trailing = _within(meeting, trailing_start)
-        if (
-            stored == listing_hash(meeting.element_text)
-            and not in_trailing
-            and (archive.root / str(entry.get("path", ""))).is_dir()
+    unlisted_days = [
+        created.date()
+        for key in candidates
+        if key.removeprefix(MCP_KEY_PREFIX) not in meetings
+        and (created := parse_timestamp(index[key].get("created_at"))) is not None
+    ]
+    if not full and unlisted_days:
+        # Re-list the weeks they fall in rather than asking get_meetings for
+        # ids nobody listed: how it answers for a deleted meeting is unknown,
+        # and a meeting that is no longer listed is simply left alone.
+        fresh: list[MCPMeeting] = []
+        for window_start, window_end in _relist_windows(
+            unlisted_days, LISTING_WINDOW_DAYS
         ):
-            counts.unchanged += 1
-            continue
-        pending.append(meeting)
+            for meeting in _scan_window(
+                client, window_start, window_end, counts, verbose=opts.verbose
+            ):
+                if meeting.meeting_id not in meetings:
+                    meetings[meeting.meeting_id] = meeting
+                    fresh.append(meeting)
+        # Neighbors listed alongside get ordinary change detection, which
+        # also catches a retitle of an old meeting.
+        more, also = _triage(
+            archive, index, uuid_map,
+            [m for m in fresh if m.meeting_id not in wanted],
+            trailing_start, counts,
+        )
+        pending += more
+        settled |= also
+        queued |= {m.meeting_id for m in more}
 
-    pending.extend(_refresh_batch(archive, index, meetings, opts.refresh_batch))
+    refresh = [
+        meetings[uuid]
+        for uuid in (key.removeprefix(MCP_KEY_PREFIX) for key in candidates)
+        if uuid in meetings and uuid not in queued
+    ]
+    counts.unchanged += len(settled - {m.meeting_id for m in refresh})
 
     # A meeting that failed last time is fetched on its own, so one that
     # always fails cannot take a batch of good ones down with it on every run.
@@ -623,6 +662,12 @@ def sync_mcp(
         failed += _write_mcp_meetings(
             archive, client, retries, folders, counts, opts, server_url,
             latch=latch, batch_size=1,
+        )
+        # Last, so real work gets the transcript budget first; optional, so a
+        # note that cannot be re-read warns instead of failing the run.
+        _write_mcp_meetings(
+            archive, client, refresh, folders, counts, opts, server_url,
+            latch=latch, optional=True,
         )
     except BaseException:
         # Drift is still loud -- the error propagates -- but the notes this
@@ -683,43 +728,161 @@ def _within(meeting: MCPMeeting, trailing_start: date) -> bool:
     return parsed.instant.date() >= trailing_start
 
 
-def _refresh_batch(
+def _triage(
     archive: Archive,
     index: dict[str, dict[str, Any]],
-    seen: dict[str, MCPMeeting],
-    limit: int,
-) -> list[MCPMeeting]:
-    """Pick the least-recently-checked MCP notes for a re-read.
-
-    Nothing in the protocol announces an edit, so this amortises the cost of
-    finding one: a fixed number of notes are re-read each run.
+    uuid_map: dict[str, list[str]],
+    meetings: Iterable[MCPMeeting],
+    trailing_start: date,
+    counts: SyncCounts,
+) -> tuple[list[MCPMeeting], set[str]]:
+    """Split listed meetings into those needing a detail call and the rest.
 
     Args:
         archive: The archive being synced.
         index: The loaded index.
-        seen: Meetings already queued this run.
-        limit: How many notes to refresh.
+        uuid_map: UUID to archive keys, for the never-downgrade check.
+        meetings: Listed meetings.
+        trailing_start: First day of the always-re-read trailing window.
+        counts: Tally to update.
 
     Returns:
-        Meetings to re-read. Only notes seen in this run's listing are
-        eligible, since a detail call needs a listing element to pair with.
+        The meetings to fetch, and the ids settled without a fetch. The
+        caller counts the settled ones as unchanged, because it knows which
+        of them a refresh is about to re-read anyway.
+    """
+    pending: list[MCPMeeting] = []
+    settled: set[str] = set()
+    for meeting in meetings:
+        key = mcp_archive_key(meeting.meeting_id)
+        if key is None:
+            counts.skipped += 1
+            print(
+                f"  SKIP  malformed meeting id from MCP: {meeting.meeting_id!r}",
+                file=sys.stderr,
+            )
+            continue
+
+        # Never downgrade: a note already archived from the public API is
+        # higher fidelity than anything the MCP can produce.
+        owners = uuid_map.get(meeting.meeting_id, [])
+        if any(not owner.startswith(MCP_KEY_PREFIX) for owner in owners):
+            settled.add(meeting.meeting_id)
+            continue
+
+        entry = index.get(key) or {}
+        stored = (entry.get("mcp") or {}).get("listing_hash")
+        if (
+            stored == listing_hash(meeting.element_text)
+            and not _within(meeting, trailing_start)
+            and (archive.root / str(entry.get("path", ""))).is_dir()
+        ):
+            settled.add(meeting.meeting_id)
+            continue
+        pending.append(meeting)
+    return pending, settled
+
+
+def _mcp_block(entry: dict[str, Any]) -> dict[str, Any]:
+    """The ``mcp`` bookkeeping block of an index entry, created if absent.
+
+    Args:
+        entry: A live index entry.
+
+    Returns:
+        The block, owned by the entry. ``index.json`` is on disk and can be
+        edited, so a value that is not a mapping is replaced, not trusted.
+    """
+    block = entry.get("mcp")
+    if not isinstance(block, dict):
+        block = entry["mcp"] = {}
+    return block
+
+
+def _latest(*stamps: Any) -> datetime:
+    """The most recent of some stored timestamps, compared as instants.
+
+    Stamps carry the local offset, so comparing the strings would misorder
+    two taken either side of a daylight-saving change.
+
+    Args:
+        *stamps: ISO 8601 strings, or ``None``.
+
+    Returns:
+        The latest instant, or :data:`_NEVER` when none parses.
+    """
+    instants = [t for t in map(parse_timestamp, stamps) if t is not None]
+    return max(instants, default=_NEVER)
+
+
+def _old_note_candidates(
+    index: dict[str, dict[str, Any]], queued: set[str], limit: int
+) -> list[str]:
+    """Pick the archived MCP notes this run should re-read.
+
+    Nothing in the protocol announces an edit, and a plain sync lists only
+    the trailing window, so a fixed number of archived notes are re-read each
+    run, drawn from the whole archive. Notes still missing a transcript come
+    first -- a throttled backfill leaves many -- then the least recently
+    checked, so edits to old meetings are found in rotation.
+
+    Args:
+        index: The loaded index.
+        queued: Meeting ids this run already reads.
+        limit: How many to pick.
+
+    Returns:
+        Archive keys, most deserving first.
     """
     if limit <= 0:
         return []
-    candidates = [
-        (str((entry.get("mcp") or {}).get("detail_fetched_at") or ""), key)
-        for key, entry in index.items()
-        if key.startswith("mcp_") and not entry.get("upstream_missing")
-    ]
-    candidates.sort()
-    picked: list[MCPMeeting] = []
-    for _, key in candidates:
-        if len(picked) >= limit:
-            break
-        meeting = seen.get(key.removeprefix("mcp_"))
-        if meeting is not None and meeting not in picked:
-            picked.append(meeting)
-    return picked
+    ranked: list[tuple[int, datetime, str]] = []
+    for key, entry in index.items():
+        if not key.startswith(MCP_KEY_PREFIX) or entry.get("upstream_missing"):
+            continue
+        if key.removeprefix(MCP_KEY_PREFIX) in queued:
+            continue
+        block = entry.get("mcp") if isinstance(entry.get("mcp"), dict) else {}
+        failures = block.get("transcript_failures")
+        failures = failures if isinstance(failures, int) else 0
+        missing = (
+            not block.get("transcript_fetched_at")
+            and failures < TRANSCRIPT_RETRY_LIMIT
+        )
+        # Every candidate is stamped when picked, so one that could not be
+        # reached -- gone upstream, say -- rotates out instead of holding the
+        # front of the queue.
+        checked = _latest(
+            block.get("refresh_attempted_at"),
+            block.get("transcript_attempted_at" if missing else "detail_fetched_at"),
+        )
+        ranked.append((0 if missing else 1, checked, key))
+    ranked.sort()
+    return [key for _, _, key in ranked[:limit]]
+
+
+def _relist_windows(days: list[date], width: int) -> list[tuple[date, date]]:
+    """Cover some meeting dates with as few listing windows as possible.
+
+    Candidates are picked in check order, which tracks meeting order, so a
+    batch usually spans a few weeks and costs one or two listing calls.
+
+    Args:
+        days: The UTC dates of the meetings to find.
+        width: The widest window to list at once.
+
+    Returns:
+        Inclusive ``(start, end)`` windows, oldest first.
+    """
+    windows: list[tuple[date, date]] = []
+    for day in sorted(set(days)):
+        # A day either side: listings are keyed by local date, instants by UTC.
+        start, end = day - timedelta(days=1), day + timedelta(days=1)
+        if windows and (end - windows[-1][0]).days < width:
+            windows[-1] = (windows[-1][0], end)
+        else:
+            windows.append((start, end))
+    return windows
 
 
 def _chunk(items: list[MCPMeeting], size: int) -> Iterator[list[MCPMeeting]]:
@@ -747,6 +910,7 @@ def _write_mcp_meetings(
     *,
     latch: _TranscriptLatch,
     batch_size: int | None = None,
+    optional: bool = False,
 ) -> list[MCPMeeting]:
     """Fetch details and transcripts for queued meetings, then archive them.
 
@@ -761,9 +925,13 @@ def _write_mcp_meetings(
         latch: Throttling state shared with the run's other write passes.
         batch_size: Ids per ``get_meetings`` call; defaults to the server's
             maximum.
+        optional: Whether these are re-reads of notes already archived. A
+            failed optional batch loses nothing, so it warns and is counted
+            as ``refresh_failed`` rather than failing the run.
 
     Returns:
-        The meetings whose detail fetch failed, for the next run to retry.
+        The meetings whose detail fetch failed and must be retried. An
+        optional pass never returns any.
     """
     from .mcp_api import MAX_MEETINGS_PER_CALL
 
@@ -779,9 +947,16 @@ def _write_mcp_meetings(
         except MCPResponseFormatError:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad batch must not end the run
-            counts.failed += len(batch)
-            failed.extend(batch)
-            print(f"  FAIL  batch of {len(batch)} — {exc}", file=sys.stderr)
+            if optional:
+                counts.refresh_failed += len(batch)
+                print(
+                    f"  WARN  could not re-read {len(batch)} older note(s) — {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                counts.failed += len(batch)
+                failed.extend(batch)
+                print(f"  FAIL  batch of {len(batch)} — {exc}", file=sys.stderr)
             continue
 
         for detail in details:
@@ -791,35 +966,45 @@ def _write_mcp_meetings(
                 continue
 
             entry = index.get(key) or {}
-            previous = entry.get("mcp") or {}
+            previous = entry.get("mcp") if isinstance(entry.get("mcp"), dict) else {}
             transcript_at = previous.get("transcript_fetched_at")
+            attempted_at = previous.get("transcript_attempted_at")
+            failures = previous.get("transcript_failures")
+            failures = failures if isinstance(failures, int) else 0
 
-            # A transcript already archived is immutable in practice, and
-            # re-fetching risks replacing good content with a degraded
-            # re-render. It is reloaded from raw.json rather than skipped
+            # A transcript already fetched -- even an empty one -- is
+            # immutable in practice, and re-fetching risks replacing good
+            # content with a degraded re-render while spending the scarcest
+            # budget there is. It is reloaded from raw.json rather than skipped
             # outright: dropping it would change the content hash on every
-            # run, so the note would look updated forever and would re-render
-            # without its transcript.
+            # run, so the note would look updated forever.
             transcript = (
-                _archived_transcript(archive, entry)
-                if entry.get("has_transcript") and transcript_at
-                else None
+                _archived_transcript(archive, entry) if transcript_at else None
             )
             if transcript is None and latch.giving_up:
                 # The quota is spent. Archive the note now rather than sleeping
-                # through a retry ladder that cannot succeed; the next run
-                # picks up exactly these notes.
+                # through a retry ladder that cannot succeed; a later run
+                # picks these notes up again.
                 counts.transcripts_deferred += 1
             elif transcript is None:
+                attempted_at = _now_iso()
                 try:
                     payload = client.get_meeting_transcript(detail.meeting_id)
                     transcript = parse_transcript(payload)
+                    if transcript.meeting_id != detail.meeting_id:
+                        # Never file one meeting's words under another's.
+                        raise ValueError(
+                            f"asked for {detail.meeting_id}, got a transcript "
+                            f"for {transcript.meeting_id}"
+                        )
                     counts.transcript_fetches += 1
-                    transcript_at = _now_iso()
+                    transcript_at = attempted_at
+                    failures = 0
                     latch.throttled = 0
                 except MCPResponseFormatError:
                     raise
                 except Exception as exc:  # noqa: BLE001
+                    transcript = None
                     # Never silent. A transcript is the most valuable thing in
                     # the archive; losing one quietly is the worst outcome
                     # here, and swallowing this is how a live backfill once
@@ -831,9 +1016,12 @@ def _write_mcp_meetings(
                     )
                     # Only throttling says anything about the *next* note; one
                     # unparseable or missing transcript says nothing at all.
-                    latch.throttled = (
-                        latch.throttled + 1 if _is_throttling(exc) else 0
-                    )
+                    # Throttling is also the one failure that says nothing
+                    # about *this* note, so it never counts against it.
+                    throttling = _is_throttling(exc)
+                    if not throttling:
+                        failures += 1
+                    latch.throttled = latch.throttled + 1 if throttling else 0
                     if latch.throttled >= TRANSCRIPT_GIVEUP_STREAK:
                         latch.giving_up = True
                         print(
@@ -844,9 +1032,10 @@ def _write_mcp_meetings(
                         )
 
             names = folders.get(detail.meeting_id) or set(previous.get("folders") or [])
+            listing = listings.get(detail.meeting_id, detail)
             raw = build_raw(
                 detail,
-                listings.get(detail.meeting_id, detail).element_text,
+                listing.element_text,
                 transcript,
                 sorted(names),
                 server_url,
@@ -857,10 +1046,25 @@ def _write_mcp_meetings(
             if note.created_at is None:
                 counts.undated += 1
 
+            bookkeeping = {
+                "parser_version": PARSER_VERSION,
+                "listing_hash": listing_hash(listing.element_text),
+                "detail_fetched_at": _now_iso(),
+                "transcript_fetched_at": transcript_at,
+                "transcript_attempted_at": attempted_at,
+                "transcript_failures": failures,
+                "date_text": detail.date_text,
+                "tz_resolved": parse_mcp_date(detail.date_text).tz_resolved,
+                "folders": sorted(names),
+            }
+
             # Hash only the verbatim tool output. Hashing the wrapper would let
             # a parser-version bump rewrite every directory in the archive.
             digest = content_hash(raw["mcp"])
             if archive.is_unchanged(key, digest):
+                # Record the check anyway: without it the rolling refresh kept
+                # picking the same unchanged notes on every run.
+                entry["mcp"] = {**previous, **bookkeeping}
                 counts.unchanged += 1
                 continue
 
@@ -872,19 +1076,7 @@ def _write_mcp_meetings(
                 transcript_md,
                 source=SOURCE_MCP,
                 digest=digest,
-                extra={
-                    "mcp": {
-                        "parser_version": PARSER_VERSION,
-                        "listing_hash": listing_hash(
-                            listings.get(detail.meeting_id, detail).element_text
-                        ),
-                        "detail_fetched_at": _now_iso(),
-                        "transcript_fetched_at": transcript_at,
-                        "date_text": detail.date_text,
-                        "tz_resolved": parse_mcp_date(detail.date_text).tz_resolved,
-                        "folders": sorted(names),
-                    }
-                },
+                extra={"mcp": bookkeeping},
             )
             counts.record(result.status)
             if opts.verbose:
@@ -953,7 +1145,9 @@ def _archived_transcript(archive: Archive, entry: dict[str, Any]) -> MCPTranscri
 
     Returns:
         The transcript, or ``None`` when it cannot be recovered -- in which
-        case the caller refetches rather than silently dropping it.
+        case the caller refetches rather than silently dropping it. An empty
+        transcript comes back empty, not ``None``: it was fetched, and asking
+        again would spend the scarcest budget on the same silence.
     """
     path = entry.get("path")
     if not path:
@@ -962,8 +1156,10 @@ def _archived_transcript(archive: Archive, entry: dict[str, Any]) -> MCPTranscri
         raw = read_json(archive.root / str(path) / RAW_NAME, default={})
     except OSError:
         return None
+    if not isinstance(raw, dict):
+        return None
     block = (raw.get("mcp") or {}).get("get_meeting_transcript")
-    if not isinstance(block, dict) or not block.get("transcript"):
+    if not isinstance(block, dict):
         return None
     return MCPTranscript(
         meeting_id=str(block.get("id") or ""),
