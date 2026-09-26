@@ -510,19 +510,25 @@ def cmd_logout(args: argparse.Namespace) -> int:
     Raises:
         SystemExit: If ``--all`` is combined with ``--profile``.
     """
-    from .mcp_auth import known_profiles
+    from .mcp_auth import FileTokenStorage, known_profiles, token_store_path
 
     profile = getattr(args, "profile", None)
     if getattr(args, "all", False):
         if profile is not None:
             raise SystemExit("--all removes every profile; drop --profile")
-        targets = [None, *known_profiles()]
+        # The default file is named directly rather than via _config: with
+        # GRANOLA_MCP_PROFILE set, "no profile" resolves to that profile, and
+        # the default credential used to survive a sweep that reported
+        # success. .env is loaded first so its token and state paths count.
+        load_dotenv()
+        paths = [token_store_path(""), *map(token_store_path, known_profiles())]
     else:
-        targets = [profile]
+        paths = [_token_path(_config(profile=profile))]
 
     removed = False
-    for name in targets:
-        storage = _mcp_storage(_config(profile=name))
+    for path in dict.fromkeys(paths):
+        # Deleting a file does not depend on which endpoint wrote it.
+        storage = FileTokenStorage(path, DEFAULT_MCP_URL)
         if storage.clear():
             print(f"Removed {storage.path}")
             removed = True
@@ -873,8 +879,8 @@ def main(argv: list[str] | None = None) -> int:
     logout_parser.add_argument(
         "--all",
         action="store_true",
-        help="remove every profile's credentials; cannot reach a file placed "
-        "elsewhere by GRANOLA_MCP_TOKEN_FILE",
+        help="remove the default credentials and every profile's; a file an "
+        "earlier GRANOLA_MCP_TOKEN_FILE pointed elsewhere is out of reach",
     )
     logout_parser.set_defaults(func=cmd_logout)
 

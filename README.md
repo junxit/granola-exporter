@@ -303,9 +303,10 @@ uv run granola-export sync
 ```
 
 That costs one browser round-trip per session. Profiles are the persistent
-alternative; `granola-export logout --all` is the blunt one, removing every
-profile's credentials in the state directory (it cannot reach a file you
-placed elsewhere with `GRANOLA_MCP_TOKEN_FILE`).
+alternative; `granola-export logout --all` is the blunt one, removing the
+default credentials and every profile's. It removes the file
+`GRANOLA_MCP_TOKEN_FILE` names now, but cannot know about one an earlier
+session pointed somewhere else.
 
 ## Configuration
 
