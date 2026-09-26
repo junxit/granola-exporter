@@ -365,6 +365,31 @@ def test_parse_drift_aborts_the_run(tmp_path):
         sync_mcp(Archive(tmp_path), Broken([]), SyncOptions(since=date(2026, 7, 1)), today=TODAY)
 
 
+def test_format_error_mid_write_keeps_what_was_archived(tmp_path):
+    """Regression: drift after the first write must not orphan that write.
+
+    A format error is re-raised on purpose -- drift is loud -- but it used to
+    escape without saving the index, so every note archived earlier in the
+    run (throttled transcripts included) vanished from index.json and was
+    refetched on the next pass.
+    """
+
+    class DriftsOnSecond(FakeMCP):
+        def get_meeting_transcript(self, meeting_id):
+            """Return a payload with no id for the second meeting."""
+            if meeting_id == _uuid(2):
+                return {"id": "", "transcript": "?"}
+            return super().get_meeting_transcript(meeting_id)
+
+    fake = DriftsOnSecond(_meetings(2))
+    with pytest.raises(MCPResponseFormatError):
+        sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 1)), today=TODAY)
+
+    reopened = Archive(tmp_path)
+    assert f"mcp_{_uuid(1)}" in reopened.load_index(), "the first note was orphaned"
+    assert reopened.source_state(SOURCE_MCP) == {}, "a failed run must not advance state"
+
+
 # -- provenance ------------------------------------------------------------
 
 
