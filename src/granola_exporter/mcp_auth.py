@@ -407,7 +407,10 @@ class _CallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         """Capture the authorization code, or reject an unexpected path."""
         parsed = urlparse(self.path)
-        if parsed.path != self.server.callback_path:
+        # One redirect per login. A later request -- a reload, or another page
+        # on this machine -- must not replace the code already captured.
+        # HTTPServer serves requests one at a time, so this cannot interleave.
+        if parsed.path != self.server.callback_path or self.server.received.is_set():
             self.send_response(404)
             self.end_headers()
             return
@@ -416,6 +419,8 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.server.error = (params.get("error") or [""])[0]
         self.server.code = (params.get("code") or [""])[0]
         self.server.state = (params.get("state") or [""])[0]
+        # RFC 9207: kept for the SDK to check against the expected issuer.
+        self.server.iss = (params.get("iss") or [""])[0]
 
         ok = bool(self.server.code) and not self.server.error
         body = _SUCCESS_BODY if ok else _FAILURE_BODY
@@ -448,6 +453,7 @@ class _CallbackServer(HTTPServer):
         self.code = ""
         self.state = ""
         self.error = ""
+        self.iss = ""
         self.received = threading.Event()
 
 
@@ -476,6 +482,15 @@ class LoopbackCallbackServer:
             The TCP port the server is listening on.
         """
         return int(self._server.server_address[1])
+
+    @property
+    def issuer(self) -> str:
+        """The ``iss`` the redirect carried, per RFC 9207.
+
+        Returns:
+            The issuer, or ``""`` when the authorization server sent none.
+        """
+        return self._server.iss
 
     @property
     def redirect_uri(self) -> str:
