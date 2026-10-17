@@ -26,9 +26,10 @@ updates:
           - "minor"
           - "patch"
 
-  # Workflow actions. These are few, and their releases are almost always major
-  # version tags (v4 -> v7), so grouping by update type would defeat the point.
-  # Everything goes in one pull request.
+  # Workflow actions, pinned by commit SHA with a version comment that Dependabot
+  # reads and rewrites. A floating major tag hid new releases: setup-uv stopped
+  # publishing them at v8, so Dependabot never offered v8 or later. These are
+  # few, so every update -- major, minor or patch -- goes in one pull request.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -92,10 +92,13 @@ requiring an attacker who already has code execution as your user.
 
 ## Dependencies
 
-Dependencies are pinned in `uv.lock` and scanned against the OSV database by CI
-on every push and pull request, plus weekly on a schedule, so a newly published
-advisory surfaces even when nothing changes. Dependabot opens update pull
-requests weekly.
+Every dependency is pinned to an exact version — direct ones, the dev tools and
+the build backend in `pyproject.toml`, transitive ones in `uv.lock` — and
+scanned against the OSV database by CI on every push and pull request, plus
+weekly on a schedule, so a newly published advisory surfaces even when nothing
+changes. CI pins its runner image, its uv version and its actions, the last by
+commit SHA because a tag can be moved. Upgrades are deliberate: Dependabot
+opens update pull requests weekly.
 
 Adding the MCP backend took the lockfile from 14 to 40 packages. `mcp` brings
 its own HTTP stack (`httpx2`, alongside the `httpx` the public API client uses)

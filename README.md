@@ -506,9 +506,11 @@ The archive can contain highly sensitive meeting content, so:
   archive root are refused.
 - Neither `.env` nor `archive/` is ever committed.
 
-Dependencies are pinned in `uv.lock` and scanned against the OSV database by CI
-on every push and pull request, plus weekly. See [SECURITY.md](SECURITY.md) to
-report a vulnerability.
+Every dependency is pinned to an exact version — direct ones, the dev tools and
+the build backend in `pyproject.toml`, the rest in `uv.lock` — and scanned
+against the OSV database by CI on every push and pull request, plus weekly. CI
+pins its runner image, its uv version and its actions (by commit SHA) too. See
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Development
 
