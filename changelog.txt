@@ -1,6 +1,31 @@
 Changelog
 =========
 
+0.6.2
+-----
+- Dependency security fixes; no code changes. PyJWT, which the MCP SDK
+  pulls in, moves from 2.13.0 to 2.15.1, clearing 13 GitHub advisories
+  against it -- one critical, five high -- that had failed the weekly
+  dependency audit. truststore moves from 0.10.4 to 0.10.5 for
+  GHSA-pmqj-r2x2-vx88 (high) and GHSA-8v28-6h89-pmvr (medium), both macOS
+  and Windows only: truststore is how the MCP client verifies TLS
+  certificates, and concurrent handshakes on its shared context could leave
+  verification off for later connections. Neither truststore advisory is in
+  the OSV database yet, so the audit could not flag them.
+- In all, 26 locked packages move to their current releases, among them mcp
+  2.3.0, python-dotenv 1.2.4, pydantic 2.14.1, httpx2 2.13.1 and starlette
+  1.8.0. MCP credentials saved by 0.6.1 carry over unchanged: login, token
+  refresh and their reuse were checked end to end against a local MCP
+  server.
+- Every dependency is pinned to an exact version: direct ones, the dev tools
+  and the build backend in pyproject.toml, the rest in uv.lock. An install
+  that bypasses the lockfile, such as pip or uv tool install, now gets the
+  same direct dependencies CI tested.
+- CI pins its runner image (ubuntu-24.04), its uv (0.13.1) and its actions,
+  by commit SHA. setup-uv moves from 7.6.0 to 10.3.0 -- it had stopped
+  publishing the floating major tags Dependabot followed -- and
+  osv-scanner-action from 2.6.0 to 2.7.0.
+
 0.6.1
 -----
 - MCP notes now carry their folders. Only sync --full listed folder
