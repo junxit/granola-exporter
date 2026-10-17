@@ -5,14 +5,17 @@ description = "Local, incremental archive of Granola meetings, transcripts and s
 license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE.md"]
 requires-python = ">=3.13"
+# Exact pins here, in the dev group and for the build backend, so nothing
+# changes until a commit changes it; uv.lock pins the transitive dependencies.
+# Upgrades are deliberate -- Dependabot proposes them weekly.
 dependencies = [
-    "httpx>=0.27",
-    "python-dotenv>=1.0",
+    "httpx==0.28.1",
+    "python-dotenv==1.2.4",
     # The MCP backend. Note this brings its own HTTP stack (httpx2) alongside
     # httpx, plus an ASGI server stack this tool never runs. It is isolated
     # behind mcp_api.MCPClient and imported lazily, so the public API path pays
     # none of it and the SDK can be swapped out in one file.
-    "mcp>=2.0",
+    "mcp==2.3.0",
 ]
 
 [project.scripts]
@@ -20,12 +23,12 @@ granola-export = "granola_exporter.cli:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "ruff>=0.16.9",
+    "pytest==9.1.1",
+    "ruff==0.16.10",
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
