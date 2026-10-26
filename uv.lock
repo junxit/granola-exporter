@@ -202,7 +202,7 @@ wheels = [
 
 [[package]]
 name = "granola-exporter"
-version = "0.6.2"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

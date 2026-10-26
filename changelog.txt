@@ -1,6 +1,18 @@
 Changelog
 =========
 
+0.6.3
+-----
+- Dependency security fix; no code changes. certifi, which httpx pulls in,
+  moves from 2026.7.22 to 2026.10.23 for GHSA-6q48-6c7w-9gw2 (critical),
+  which had failed the weekly dependency audit. The bundle trusted the
+  emSign ECC Root CA - G3 root, and eight eMudhra intermediates that chain
+  to it have compromised private keys, so an on-path attacker holding one
+  could intercept TLS traffic to any host. The public API backend verifies
+  TLS against this bundle while it sends the API key; the MCP backend uses
+  the OS trust store and was not affected. 2026.10.23 also drops two
+  further emSign roots, C1 and ECC C3.
+
 0.6.2
 -----
 - Dependency security fixes; no code changes. PyJWT, which the MCP SDK
