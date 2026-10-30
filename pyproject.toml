@@ -24,7 +24,7 @@ granola-export = "granola_exporter.cli:main"
 [dependency-groups]
 dev = [
     "pytest==9.1.1",
-    "ruff==0.17.1",
+    "ruff==0.17.3",
 ]
 
 [build-system]
