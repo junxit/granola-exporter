@@ -19,6 +19,10 @@ Changelog
   none. The flat text is kept verbatim in raw.json and the note is marked
   degraded. A sync interrupted while moving a note's directory no longer
   hides its transcript from the next run either.
+- Dependency security fix: opentelemetry-api, which the MCP SDK pulls in,
+  moves from 1.45.1 to 1.45.2 for GHSA-mf5v-w3w3-f6cg (medium), a denial of
+  service through quadratic-time traceparent parsing, which had failed the
+  dependency audit. Merged from Dependabot (#18).
 
 0.6.3
 -----
