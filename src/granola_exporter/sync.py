@@ -29,12 +29,14 @@ from .mcp_parse import (
     parse_meetings_detail,
     parse_meetings_listing,
     parse_transcript,
+    split_transcript,
 )
 from .models import (
     MCP_KEY_PREFIX,
     SOURCE_MCP,
     SOURCE_PUBLIC_API,
     Note,
+    Utterance,
     is_valid_note_id,
     mcp_archive_key,
     parse_timestamp,
@@ -204,6 +206,65 @@ def _stub_updated_at(stub: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+def _has_transcript(value: Any) -> bool:
+    """Check whether a public API ``transcript`` value holds any words.
+
+    Args:
+        value: A payload's ``transcript``: a list of utterances, or ``None``
+            when the note has none.
+
+    Returns:
+        ``True`` when at least one utterance has text.
+    """
+    return isinstance(value, list) and any(
+        isinstance(u, dict) and str(u.get("text") or "").strip() for u in value
+    )
+
+
+def _keep_archived_transcript(archive: Archive, note: Note) -> bool:
+    """Carry an archived transcript into a note fetched without one.
+
+    Transcript auto-deletion removes a transcript but keeps its note. If the
+    API goes on serving that note, the payload written as fetched would
+    replace ``raw.json`` and take the only full-fidelity copy with it. The
+    archived transcript is carried over instead, before anything is hashed or
+    rendered, so ``raw.json``, ``note.md``, ``transcript.md`` and the content
+    hash all agree. Only absence is overridden: a transcript Granola does
+    serve always wins.
+
+    Args:
+        archive: The archive holding the note.
+        note: The freshly fetched note. Its ``raw`` and ``transcript`` are
+            updated in place when a transcript is carried over.
+
+    Returns:
+        ``True`` when the note now carries a transcript only the archive had.
+    """
+    if _has_transcript(note.raw.get("transcript")):
+        return False
+    archived = archive.archived_raw(note)
+    if archived is None:
+        return False
+
+    utterances = archived.get("transcript")
+    if _has_transcript(utterances):
+        note.raw["transcript"] = utterances
+        note.transcript = [Utterance.from_api(u) for u in utterances]
+        return True
+
+    # A note adopted from the MCP backend. Its transcript is flat text that
+    # the public API's shape cannot hold, so it is kept verbatim alongside,
+    # where the next fetch finds it again, and rendered as the MCP renders it.
+    mcp = archived.get("mcp")
+    block = mcp.get("get_meeting_transcript") if isinstance(mcp, dict) else None
+    if isinstance(block, dict) and str(block.get("transcript") or "").strip():
+        note.raw["mcp"] = {"get_meeting_transcript": block}
+        note.transcript = split_transcript(str(block["transcript"]))
+        note.degraded = True
+        return True
+    return False
+
+
 def sync_public_api(
     archive: Archive,
     client: PublicAPIClient,
@@ -237,6 +298,7 @@ def sync_public_api(
     counts = SyncCounts()
     seen_ids: set[str] = set()
     high_water: str | None = archive.watermark
+    kept_transcripts = 0
 
     try:
         for stub in client.iter_notes(updated_after=updated_after):
@@ -304,20 +366,36 @@ def sync_public_api(
                 )
                 continue
 
-            if archive.is_unchanged(note.id, content_hash(note.raw)):
-                counts.unchanged += 1
-                continue
-
             # If this meeting was previously archived through MCP, take the
             # entry over rather than writing a second copy under the `not_*`
-            # key. The higher-fidelity source always wins.
+            # key. The higher-fidelity source always wins. This runs before
+            # the change check so that a transcript archived under the MCP key
+            # can be kept below; an adopted entry has no hash, so the check
+            # could never have passed for it anyway.
             retired = archive.adopt_mcp_entry(note)
             if retired and opts.verbose:
                 print(f"  adopt     {note.display_title} (was {retired})")
 
+            kept = _keep_archived_transcript(archive, note)
+
+            if archive.is_unchanged(note.id, content_hash(note.raw)):
+                counts.unchanged += 1
+                continue
+
+            extra = None
+            if kept:
+                # The transcript's own `upstream_missing`: the note is still
+                # served, but only this archive still has its transcript.
+                kept_transcripts += 1
+                since = (index.get(note.id) or {}).get("transcript_missing_since")
+                extra = {
+                    "transcript_upstream_missing": True,
+                    "transcript_missing_since": since or _now_iso(),
+                }
+
             transcript_md = render_transcript(note)
             note_md = render_note(note, has_transcript_file=bool(transcript_md))
-            result = archive.write_note(note, note_md, transcript_md)
+            result = archive.write_note(note, note_md, transcript_md, extra=extra)
             counts.record(result.status)
             if opts.verbose:
                 print(f"  {result.status:9} {note.display_title}")
@@ -326,6 +404,12 @@ def sync_public_api(
         # notes on disk that the index has never heard of.
         archive.save_index()
         raise
+
+    if kept_transcripts:
+        print(
+            f"  {kept_transcripts} transcript(s) no longer served upstream "
+            "— kept from the archive."
+        )
 
     if full:
         # Scoped to this source: the MCP backend sees a different id namespace,

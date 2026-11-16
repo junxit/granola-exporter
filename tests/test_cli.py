@@ -405,6 +405,21 @@ def test_verify_runs_on_an_empty_archive(capsys):
     assert "indexed notes      : 0" in capsys.readouterr().out
 
 
+def test_verify_counts_transcripts_only_the_archive_has(capsys, tmp_path, note_payload):
+    """A transcript Granola stopped serving is reported, never a failure."""
+    from granola_exporter.models import Note
+    from granola_exporter.store import Archive
+
+    archive = Archive(tmp_path / "archive")
+    archive.write_note(
+        Note.from_api(note_payload), "# x", None, extra={"transcript_upstream_missing": True}
+    )
+    archive.save_index()
+
+    assert main(["verify"]) == 0
+    assert "transcript-missing : 1 (retained locally)" in capsys.readouterr().out
+
+
 # -- verify: MCP reconcile -------------------------------------------------
 
 

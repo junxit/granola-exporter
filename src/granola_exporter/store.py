@@ -534,6 +534,39 @@ class Archive:
         entry = self.load_index().get(note_id) or {}
         return str(entry.get("source") or SOURCE_PUBLIC_API)
 
+    def archived_raw(self, note: Note) -> dict[str, Any] | None:
+        """Read the ``raw.json`` this archive already holds for a note.
+
+        Looks where the index says the note lives, then where ``write_note``
+        would put it. A relocation interrupted before the index was saved
+        leaves the files at the second place while the index still names the
+        first, and an archived payload must not be mistaken for absent.
+
+        Args:
+            note: The note about to be written.
+
+        Returns:
+            The decoded payload, or ``None`` when there is no readable one.
+
+        Raises:
+            UnsafeArchivePathError: If the note id is malformed, exactly as
+                ``write_note`` would for the same note.
+        """
+        entry = self.load_index().get(note.id) or {}
+        directories = []
+        if entry.get("path"):
+            try:
+                directories.append(_resolve_within(self.root, str(entry["path"])))
+            except UnsafeArchivePathError:
+                # Never read through an entry pointing outside the archive.
+                pass
+        directories.append(self.note_dir(note))
+        for directory in directories:
+            raw = _read_json(directory / RAW_NAME, default=None)
+            if isinstance(raw, dict):
+                return raw
+        return None
+
     def uuid_index(self) -> dict[str, list[str]]:
         """Map each archived note's UUID to the archive key(s) holding it.
 

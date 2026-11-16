@@ -1,6 +1,25 @@
 Changelog
 =========
 
+0.6.4
+-----
+- A transcript Granola deletes is no longer lost from the archive.
+  Transcript auto-deletion can remove a transcript while the public API keeps
+  serving its note. The next fetch of that note -- after any edit that moved
+  its updated_at -- rewrote raw.json from a payload with no transcript,
+  taking the only copy with per-utterance timestamps and speaker attribution.
+  transcript.md survived, but note.md stopped linking it and index.json
+  recorded has_transcript false. The archived transcript is now carried into
+  the new payload before it is hashed or rendered, so raw.json, note.md and
+  transcript.md all keep it, and the note is flagged
+  transcript_upstream_missing in index.json; verify counts them. A
+  transcript Granola serves again replaces the kept one and clears the flag.
+- The same holds when a key arrives for a note archived through the MCP:
+  adopting it no longer drops the MCP transcript when the public API serves
+  none. The flat text is kept verbatim in raw.json and the note is marked
+  degraded. A sync interrupted while moving a note's directory no longer
+  hides its transcript from the next run either.
+
 0.6.3
 -----
 - Dependency security fix; no code changes. certifi, which httpx pulls in,

@@ -7,6 +7,7 @@ runs offline with no SDK, no network and no credentials.
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -769,6 +770,63 @@ def test_public_api_adopts_an_mcp_note(tmp_path, note_payload, monkeypatch):
     assert index[note_payload["id"]]["source"] == SOURCE_PUBLIC_API
     dupes = {u: k for u, k in archive.uuid_index().items() if len(k) > 1}
     assert not dupes, f"adoption left a duplicate: {dupes}"
+    raw = json.loads(
+        (archive.root / index[note_payload["id"]]["path"] / "raw.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert raw == note_payload, "a transcript Granola serves replaces the MCP one"
+    assert "transcript_upstream_missing" not in index[note_payload["id"]]
+
+
+def test_adoption_keeps_an_mcp_transcript_the_public_api_lacks(tmp_path, note_payload):
+    """A key arriving after Granola deleted a transcript must not cost the MCP copy.
+
+    The MCP's flat text cannot become the public API's utterances, so it is
+    kept verbatim in raw.json, where the next fetch finds it again.
+    """
+    import httpx
+
+    from granola_exporter.public_api import PublicAPIClient, RateLimiter
+
+    uuid = Note.from_api(note_payload).uuid
+    words = " Them: the budget doubled.  Me: we start at nine. "
+    fake = FakeMCP([(uuid, "MCP's title", date(2026, 1, 27))], transcripts={uuid: words})
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 1, 1)), today=TODAY)
+
+    served = {"note": dict(note_payload, transcript=None)}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/notes"):
+            return httpx.Response(
+                200, json={"notes": [served["note"]], "hasMore": False, "cursor": None}
+            )
+        return httpx.Response(200, json=served["note"])
+
+    client = PublicAPIClient("grn_test", base_url="https://api.test/v1")
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    client._limiter = RateLimiter(capacity=1000, rate=1e6)
+    sync_public_api(Archive(tmp_path), client)
+
+    index = Archive(tmp_path).load_index()
+    assert f"mcp_{uuid}" not in index, "still adopted, not duplicated"
+    entry = index[note_payload["id"]]
+    directory = tmp_path / entry["path"]
+    raw = json.loads((directory / "raw.json").read_text(encoding="utf-8"))
+    assert raw["mcp"]["get_meeting_transcript"]["transcript"] == words
+    assert (entry["source"], entry["has_transcript"], entry["degraded"]) == (
+        SOURCE_PUBLIC_API, True, True,
+    )
+    assert entry["transcript_upstream_missing"] is True
+    assert "[Full transcript](transcript.md)" in (directory / "note.md").read_text(
+        encoding="utf-8"
+    )
+    assert "the budget doubled" in (directory / "transcript.md").read_text(encoding="utf-8")
+
+    served["note"] = dict(served["note"], updated_at="2026-03-01T00:00:00Z")
+    sync_public_api(Archive(tmp_path), client)
+    raw = json.loads((directory / "raw.json").read_text(encoding="utf-8"))
+    assert raw["mcp"]["get_meeting_transcript"]["transcript"] == words, "kept again"
 
 
 def test_mcp_sync_does_not_flag_public_api_notes_missing(tmp_path, note_payload):

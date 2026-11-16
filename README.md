@@ -157,7 +157,7 @@ archive/
   2026/01/2026-01-27--quarterly-yoghurt-budget--not_1d3tmYTlCICgjy/
     note.md          # YAML frontmatter, summary, attendees, folders
     transcript.md    # speaker-labeled, timestamped, runs merged
-    raw.json         # verbatim API payload
+    raw.json         # verbatim API payload, plus any transcript Granola deleted
   index.json         # id -> path, dates, folders, content hash
   .sync-state.json   # updated_at watermark
 ```
@@ -188,8 +188,14 @@ The archive is **append-mostly by design**:
   `sync --full` with no truncated windows sets the flag, and only for meetings
   dated after the oldest one it still lists. History the MCP no longer serves
   at all — the free plan stops after 30 days — is not mistaken for deletion.
-- An archived transcript is never removed just because the API stops returning
-  one.
+- **A transcript Granola deletes is kept.** Auto-deletion can remove a
+  transcript while Granola keeps serving its note. When a fetched note has
+  none, the archived transcript stays in `raw.json`, `note.md` and
+  `transcript.md`, and the note is flagged `transcript_upstream_missing` in
+  `index.json`; `verify` counts them. A transcript Granola serves again
+  replaces the kept one and clears the flag. This holds when a key arrives
+  for a note archived through the MCP, too: its flat transcript is kept
+  verbatim in `raw.json` and the note is marked degraded.
 - Renaming a meeting **moves** its directory rather than leaving a duplicate.
 
 ## Multiple accounts

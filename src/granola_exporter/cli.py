@@ -754,6 +754,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     flagged = [k for k, v in index.items() if v.get("upstream_missing")]
     if flagged:
         print(f"  upstream-missing   : {len(flagged)} (retained locally)")
+    kept = [k for k, v in index.items() if v.get("transcript_upstream_missing")]
+    if kept:
+        print(f"  transcript-missing : {len(kept)} (retained locally)")
 
     folders: dict[str, int] = {}
     for entry in index.values():
