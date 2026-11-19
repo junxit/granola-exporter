@@ -36,7 +36,7 @@ from .models import (
     is_valid_uuid,
 )
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 
 MEETINGS_ROOT = "meetings_data"
 
@@ -68,19 +68,19 @@ _XML_ENTITIES = (
 
 _ATTR_RE = re.compile(r"""([A-Za-z_][\w:.\-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 
-_KNOWN_MEETING_ATTRS = frozenset(
-    {
-        "id",
-        "title",
-        "date",
-        "captured_by_me",
-        "listed_as_participant",
-        "is_workspace_visible",
-    }
-)
+_FLAG_ATTRS = ("captured_by_me", "listed_as_participant", "is_workspace_visible")
+
+_KNOWN_MEETING_ATTRS = frozenset({"id", "title", "date", "meeting_at", *_FLAG_ATTRS})
 
 _OPEN_TAG_RE = re.compile(r"<meeting\b[^>]*>", re.DOTALL)
 _ROOT_OPEN_RE = re.compile(rf"<{MEETINGS_ROOT}\b[^>]*>", re.DOTALL)
+# Both sit outside the <meetings_data> root: the cursor in the preamble, and
+# the other captures of a calendar event after it.
+_PAGINATION_RE = re.compile(r"<pagination\b[^>]*>", re.DOTALL)
+_DUPLICATES_RE = re.compile(
+    r"<duplicate_recordings\b[^>]*>(.*?)</duplicate_recordings>", re.DOTALL
+)
+_ID_LIST_RE = re.compile(r"[\s,]+")
 _PARTICIPANTS_RE = re.compile(
     r"<known_participants>(.*?)</known_participants>", re.DOTALL
 )
@@ -113,16 +113,33 @@ class MCPResponseFormatError(RuntimeError):
 
 @dataclass(slots=True)
 class MCPListingEnvelope:
-    """The ``<meetings_data>`` wrapper's own attributes."""
+    """The ``<meetings_data>`` wrapper's own attributes, and what surrounds it.
+
+    ``paginated`` says whether the response carried a ``<pagination>``
+    element at all. One without it is from a server that pages nothing, and
+    ``has_more``, ``next_cursor`` and ``total_count`` then mean nothing.
+    """
 
     count: int
     date_from: str = ""
     date_to: str = ""
+    paginated: bool = False
+    has_more: bool = False
+    next_cursor: str = ""
+    total_count: int | None = None
+    duplicates: list[MCPMeeting] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class MCPMeeting:
-    """One ``<meeting>`` element, from either the listing or detail tool."""
+    """One ``<meeting>`` element, from either the listing or detail tool.
+
+    A meeting named only in ``<duplicate_recordings>`` -- another capture of
+    a listed meeting's calendar event -- has no element of its own. It is
+    carried with ``duplicate_of`` set to the listed meeting's id, the group's
+    tag as ``element_text`` and that meeting's date, and no title: the detail
+    call supplies the rest.
+    """
 
     meeting_id: str
     title: str
@@ -134,6 +151,7 @@ class MCPMeeting:
     listed_as_participant: bool | None = None
     is_workspace_visible: bool | None = None
     unknown_attrs: dict[str, str] = field(default_factory=dict)
+    duplicate_of: str = ""
 
 
 @dataclass(slots=True)
@@ -186,6 +204,9 @@ _DATE_RE = re.compile(
     r"^(?P<naive>[A-Za-z]{3}\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))"
     r"\s*(?P<tz>[A-Za-z]{1,5})?$"
 )
+
+# `meeting_at`: a date *and* time. A bare date names no instant at all.
+_ISO_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 def _guard(text: str, tool: str) -> None:
@@ -354,6 +375,9 @@ def _parse_meetings(text: str, tool: str) -> tuple[MCPListingEnvelope, list[MCPM
             f"non-numeric count attribute {raw_count!r}", tool=tool
         ) from exc
 
+    # A flag matching its default is left off the meeting and named once here.
+    defaults = _flag_defaults(root_attrs.get("flag_defaults", ""))
+
     meetings: list[MCPMeeting] = []
     for chunk in block.split("</meeting>")[:-1]:
         open_match = _OPEN_TAG_RE.search(chunk)
@@ -364,7 +388,10 @@ def _parse_meetings(text: str, tool: str) -> tuple[MCPListingEnvelope, list[MCPM
 
         meeting_id = (attrs.get("id") or "").strip().lower()
         title = (attrs.get("title") or "").strip()
-        date_text = (attrs.get("date") or "").strip()
+        # `date` is the localized form older servers sent, `meeting_at` the
+        # ISO 8601 one that replaced it. The older wins where both appear, so
+        # every element already archived parses exactly as it did.
+        date_text = (attrs.get("date") or attrs.get("meeting_at") or "").strip()
         if not meeting_id or not title or not date_text:
             raise MCPResponseFormatError(
                 "meeting element missing id, title or date",
@@ -372,6 +399,10 @@ def _parse_meetings(text: str, tool: str) -> tuple[MCPListingEnvelope, list[MCPM
                 excerpt=open_match.group(0),
             )
 
+        flags = {
+            name: _bool_attr(attrs.get(name, defaults.get(name)))
+            for name in _FLAG_ATTRS
+        }
         summary = _SUMMARY_RE.search(chunk)
         meetings.append(
             MCPMeeting(
@@ -383,9 +414,9 @@ def _parse_meetings(text: str, tool: str) -> tuple[MCPListingEnvelope, list[MCPM
                 summary_markdown=(
                     _xml_unescape(summary.group(1)).strip() if summary else ""
                 ),
-                captured_by_me=_bool_attr(attrs.get("captured_by_me")),
-                listed_as_participant=_bool_attr(attrs.get("listed_as_participant")),
-                is_workspace_visible=_bool_attr(attrs.get("is_workspace_visible")),
+                captured_by_me=flags["captured_by_me"],
+                listed_as_participant=flags["listed_as_participant"],
+                is_workspace_visible=flags["is_workspace_visible"],
                 unknown_attrs={
                     k: v for k, v in attrs.items() if k not in _KNOWN_MEETING_ATTRS
                 },
@@ -400,14 +431,137 @@ def _parse_meetings(text: str, tool: str) -> tuple[MCPListingEnvelope, list[MCPM
             tool=tool,
         )
 
+    # The pagination element precedes the root and the duplicate groups
+    # follow it. Each is looked for only there: a summary is free Markdown,
+    # and one quoting either tag must not be read as the real thing.
+    root_open = _ROOT_OPEN_RE.search(text)
+    closing = text.rfind(f"</{MEETINGS_ROOT}>")
+    head = text[: root_open.start()]
+    tail = text[closing:] if closing != -1 else text[root_open.end() :]
+
     return (
         MCPListingEnvelope(
             count=len(meetings),
             date_from=root_attrs.get("from", ""),
             date_to=root_attrs.get("to", ""),
+            **_pagination(head, tool),
+            duplicates=_duplicates(tail, {m.meeting_id: m for m in meetings}, tool),
         ),
         meetings,
     )
+
+
+def _flag_defaults(text: str) -> dict[str, str]:
+    """Read a root's ``flag_defaults``: the flag values a meeting leaves off.
+
+    Args:
+        text: The attribute's value, such as
+            ``captured_by_me=true is_workspace_visible=false``; ``""`` when
+            the root carries none.
+
+    Returns:
+        Flag name to raw value.
+    """
+    defaults: dict[str, str] = {}
+    for pair in text.split():
+        name, sep, value = pair.partition("=")
+        if sep and name:
+            defaults[name] = value
+    return defaults
+
+
+def _pagination(head: str, tool: str) -> dict[str, Any]:
+    """Read the ``<pagination>`` element of a paged listing.
+
+    Args:
+        head: The response text before the ``<meetings_data>`` root.
+        tool: The tool it came from.
+
+    Returns:
+        ``paginated``, ``has_more``, ``next_cursor`` and ``total_count``, or
+        nothing when the response is not paged.
+
+    Raises:
+        MCPResponseFormatError: If the element is present but unreadable. A
+            cursor this tool cannot follow must not read as the last page.
+    """
+    match = _PAGINATION_RE.search(head)
+    if not match:
+        return {}
+    attrs = _attrs_of(match.group(0))
+    has_more = _bool_attr(attrs.get("has_more"))
+    cursor = (attrs.get("next_cursor") or "").strip()
+    if has_more is None or (has_more and not cursor):
+        raise MCPResponseFormatError(
+            "pagination without a readable has_more and next_cursor",
+            tool=tool,
+            excerpt=match.group(0),
+        )
+    raw_total = attrs.get("total_count")
+    try:
+        total = int(raw_total) if raw_total is not None else None
+    except ValueError as exc:
+        raise MCPResponseFormatError(
+            f"non-numeric total_count attribute {raw_total!r}", tool=tool
+        ) from exc
+    return {
+        "paginated": True,
+        "has_more": has_more,
+        "next_cursor": cursor,
+        "total_count": total,
+    }
+
+
+def _duplicates(
+    tail: str, listed: dict[str, MCPMeeting], tool: str
+) -> list[MCPMeeting]:
+    """Read the meetings a listing names only as other captures of one it lists.
+
+    Granola groups the captures of one calendar event -- two people's notes of
+    the same call, say -- and lists one of them, naming the rest in
+    ``<duplicate_recordings>``. Each is still a note of its own, so each comes
+    back for archiving, carrying the listed meeting's date: the date of the
+    event they share.
+
+    Args:
+        tail: The response text after the ``<meetings_data>`` root.
+        listed: The meetings the root lists, by id.
+        tool: The tool it came from.
+
+    Returns:
+        One entry per meeting not already listed, in order of appearance.
+
+    Raises:
+        MCPResponseFormatError: If a group names no meeting or no others.
+    """
+    found: dict[str, MCPMeeting] = {}
+    for block in _DUPLICATES_RE.finditer(tail):
+        for tag in _OPEN_TAG_RE.findall(block.group(1)):
+            attrs = _attrs_of(tag)
+            kept = (attrs.get("id") or "").strip().lower()
+            others = [
+                other.lower()
+                for other in _ID_LIST_RE.split(attrs.get("other_ids") or "")
+                if other
+            ]
+            if not kept or not others:
+                raise MCPResponseFormatError(
+                    "duplicate recording without an id or other_ids",
+                    tool=tool,
+                    excerpt=tag,
+                )
+            anchor = listed.get(kept)
+            for other in others:
+                if other in listed or other in found:
+                    continue
+                found[other] = MCPMeeting(
+                    meeting_id=other,
+                    title="",
+                    date_text=anchor.date_text if anchor else "",
+                    element_text=tag,
+                    duplicate_of=kept,
+                )
+    return list(found.values())
 
 
 def parse_meetings_listing(text: str) -> tuple[MCPListingEnvelope, list[MCPMeeting]]:
@@ -599,24 +753,28 @@ def split_transcript(text: str) -> list[Utterance]:
 
 
 def parse_mcp_date(text: str) -> ParsedMCPDate:
-    """Resolve a localized MCP date string to a UTC instant.
+    """Resolve an MCP date string to a UTC instant.
 
-    ``strptime`` cannot reliably consume ``%Z`` for arbitrary abbreviations, so
-    the naive portion is parsed on its own and the trailing abbreviation is
+    Two forms are understood: the ISO 8601 ``meeting_at`` the server sends
+    now, and the localized ``date`` it sent before. For the localized form,
+    ``strptime`` cannot reliably consume ``%Z`` for arbitrary abbreviations,
+    so the naive portion is parsed on its own and the trailing abbreviation is
     mapped through :data:`TZ_ABBREVIATIONS`.
 
     Args:
-        text: A string such as ``"Jul 28, 2026 8:00 PM CDT"``.
+        text: A string such as ``"2026-07-28T20:00:00-05:00"`` or
+            ``"Jul 28, 2026 8:00 PM CDT"``.
 
     Returns:
         The parse. An unmapped abbreviation leaves ``instant`` as ``None``
         rather than guessing: an undated note is a visible defect, a
-        confidently wrongly-dated one is not.
+        confidently wrongly-dated one is not. A time without an offset or
+        abbreviation is read as UTC and marked unresolved.
     """
     raw = (text or "").strip()
     match = _DATE_RE.match(raw)
     if not match:
-        return ParsedMCPDate(instant=None, text=raw)
+        return _parse_iso_date(raw)
 
     try:
         naive = datetime.strptime(
@@ -637,6 +795,27 @@ def parse_mcp_date(text: str) -> ParsedMCPDate:
         text=raw,
         tz_resolved=True,
     )
+
+
+def _parse_iso_date(raw: str) -> ParsedMCPDate:
+    """Resolve an ISO 8601 date and time, such as a ``meeting_at``.
+
+    Args:
+        raw: The stripped string.
+
+    Returns:
+        The parse, with ``instant`` ``None`` for anything that is not a date
+        and time.
+    """
+    if not _ISO_DATETIME_RE.match(raw):
+        return ParsedMCPDate(instant=None, text=raw)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return ParsedMCPDate(instant=None, text=raw)
+    if parsed.tzinfo is None:
+        return ParsedMCPDate(instant=parsed.replace(tzinfo=UTC), text=raw, tz_resolved=False)
+    return ParsedMCPDate(instant=parsed.astimezone(UTC), text=raw, tz_resolved=True)
 
 
 def _user_from_label(label: str) -> User:

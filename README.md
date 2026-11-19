@@ -34,7 +34,7 @@ only supported path to the same data.
 | --- | --- | --- |
 | Plan required | Business / Enterprise | **All plans, incl. free** |
 | Auth | `grn_` key in `.env` | Browser OAuth (`granola-export login`) |
-| Timestamps | ISO 8601 `created_at` + `updated_at` | localized, minute-rounded; **no `updated_at`** |
+| Timestamps | ISO 8601 `created_at` + `updated_at` | scheduled start, minute-rounded; **no `updated_at`** |
 | Incremental | `updated_after` + cursor paging | date windows + content hashing |
 | Transcripts | diarized, timestamped utterances | flat text, speaker labels only |
 | Folders | inline on every note | one extra listing per folder |
@@ -369,23 +369,31 @@ These were measured against a real 92-note archive, not assumed.
 All of this was measured against the live service, not assumed. If you have an
 API key, use it — this backend exists for accounts that cannot get one.
 
-- **No `updated_at`, and no cursor.** The MCP exposes neither an updated-since
-  filter nor pagination, so change detection is rebuilt from what the listing
-  does return: a hash of each `<meeting>` element stands in for the stub's
-  `updated_at`. That catches retitles, date changes and participant changes.
+- **No `updated_at` in the listing.** Change detection is rebuilt from what the
+  listing does return: a hash of each `<meeting>` element stands in for the
+  stub's `updated_at`. That catches retitles, date changes and participant
+  changes.
 - **Edits to older meetings lag.** An incremental run rescans a trailing window
   (31 days by default, `--window`) and also re-reads up to 30 older archived
-  notes (`--refresh-batch`): those still missing a transcript first, then the
-  least recently checked, found by re-listing the weeks they fall in. A summary
+  notes (`--refresh-batch`): those still missing a transcript first, then those
+  whose transcript is due a re-check (below), then the least recently checked,
+  found by re-listing the weeks they fall in. A summary
   regenerated long after its meeting is picked up when the rotation reaches it
   — within archive size ÷ 30 runs — not immediately. `sync --full` catches a
   retitle, date or participant change at once, since those show in the
   listing; to re-read every summary now, run `sync --full --refresh-batch N`
   with N at least the size of your archive.
-- **Completeness is not provable.** With no pagination there is no way to know a
-  listing was not truncated. Windows returning 50+ results are bisected and
-  rescanned; a single day still at the cap is *reported* as possibly incomplete
-  rather than silently trusted.
+- **Listings are paged.** Each window is followed by its cursor to the last
+  page and checked against the total the server reports; a window that comes
+  up short is *reported* as possibly incomplete rather than silently trusted.
+  A listing that is not paged proves nothing, so there a window returning 50+
+  results is bisected and rescanned, and a single day still at the cap is
+  reported the same way.
+- **Other captures of a meeting are listed apart.** When several people record
+  the same calendar event, the listing shows one note and names the rest only
+  in `<duplicate_recordings>`. Each is still a note of its own: it is archived
+  and filed in its folders like any other — the group's tag standing in for
+  its listing element — and a full scan never takes one for a deleted note.
 - **A backfill ends at a long silence.** Without `--since`, it walks back month
   by month until six consecutive months come back empty, and takes that as the
   start of your history. If yours has a longer gap, pass `--since` to reach
@@ -405,13 +413,15 @@ API key, use it — this backend exists for accounts that cannot get one.
   public API   **[04:12] Oat Benson**
   MCP          **Them**
   ```
-- **Dates are localized and minute-rounded.** The MCP reports a meeting's
-  *scheduled start in local time* (`Jul 28, 2026 8:00 PM CDT`) where the public
-  API reports `created_at` in UTC. Notes are filed under the resolved UTC date
-  so both backends agree, and the original string is preserved verbatim in
-  frontmatter as `date_text`. An unrecognized timezone abbreviation leaves the
-  note **undated** rather than guessing — a visibly undated note is a better
-  failure than a confidently wrong one.
+- **Dates are the scheduled start, minute-rounded.** The MCP reports a meeting's
+  *scheduled start* — as ISO 8601 with its offset
+  (`meeting_at="2026-07-28T20:00:00-05:00"`), and before that in local time
+  (`Jul 28, 2026 8:00 PM CDT`) — where the public API reports `created_at` in
+  UTC. Notes are filed under the resolved UTC date so both backends agree, and
+  the original string is preserved verbatim in frontmatter as `date_text`. An
+  unrecognized timezone abbreviation leaves the note **undated** rather than
+  guessing — a visibly undated note is a better failure than a confidently
+  wrong one.
 - **No owner, calendar event, or `web_url`.** `web_url` is synthesised from the
   meeting UUID, which is safe because the id equivalence below is verified.
 - **Folder membership costs extra.** Neither `list_meetings` nor `get_meetings`
@@ -440,14 +450,27 @@ API key, use it — this backend exists for accounts that cannot get one.
   archived **without** a transcript rather than being skipped, the count is
   reported as a warning, and **re-running `sync` retries them** — notes in the
   trailing window on every run, older ones up to `--refresh-batch` per run,
-  ahead of any other re-read. An archived transcript is never refetched, so
-  re-runs are cheap and converge. A note whose transcript has failed three
-  times for a reason other than throttling — a meeting with no audio, say —
-  stops jumping that queue. Once three notes in a row have been throttled the
+  ahead of any other re-read. An archived transcript is never refetched once it
+  is known whole, so re-runs are cheap and converge. A note whose transcript
+  has failed three times for a reason other than throttling — a meeting with no
+  audio, say — stops jumping that queue. Once three notes in a row have been
+  throttled the
   pass stops requesting transcripts altogether and says so, rather than
   spending ~2 minutes per note sleeping against a spent quota; the remaining
   notes are archived immediately and picked up by later runs. Budget several
   passes for a first MCP backfill.
+- **Transcripts come in pages.** `get_meeting_transcript` returns a long
+  transcript a page at a time. Every page is fetched, each asked for as large
+  as the server allows, so most transcripts still take a single call.
+  Versions up to 0.6.4 read only the first page, so a long transcript they
+  archived may be cut short. Each is **re-checked once**: when what Granola
+  serves continues the archived text word for word, the archived copy is
+  completed; when Granola serves something else, or nothing, the archived copy
+  is kept as it is and marked `transcript_complete: false`. `verify` counts
+  the transcripts still due a check (`transcript-recheck`) and those kept
+  (`transcript-partial`). A plain `sync` re-checks the trailing window and up
+  to `--refresh-batch` older notes per run; `sync --full` re-checks every one
+  it lists.
 
 ### How the two backends join up
 

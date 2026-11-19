@@ -107,6 +107,8 @@ MCP_PREAMBLE = (
 
 UUID_A = "d290f1ee-6c54-4b01-90e6-d701748f0851"
 UUID_B = "e96c1c66-ed02-4a32-9acd-54720f8761b1"
+UUID_C = "7c4f0a52-3b1e-4d8a-9f60-2e5b8c1d0a93"
+FOLDER_ID = "ecd86f8d-9c90-4de6-a4d6-85dc666dafaf"
 
 
 @pytest.fixture
@@ -198,6 +200,92 @@ def mcp_transcript_payload() -> dict:
             " and the doc is at https://example.com/x.  Them: Sounds good. "
         ),
     }
+
+
+@pytest.fixture
+def mcp_current_listing_text() -> str:
+    """A ``list_meetings`` page in the shape the server sends now.
+
+    ``date`` has given way to an ISO 8601 ``meeting_at``, and a flag equal to
+    the root's ``flag_defaults`` is left off the meeting. A ``<pagination>``
+    element precedes the root, each meeting lists its folders, and another
+    capture of the first meeting's calendar event is named only in the
+    ``<duplicate_recordings>`` that follow the root.
+
+    Returns:
+        The verbatim tool output.
+    """
+    return MCP_PREAMBLE + (
+        '<pagination has_more="true" total_count="3" remaining_count="1" '
+        'next_cursor="cursor-page-2" />\n\n'
+        '<requested_range time_range="custom" timezone="UTC" '
+        'start="2026-01-27T00:00:00+00:00" end="2026-01-29T00:00:00+00:00" '
+        'end_inclusive="false">Queried meetings from Jan 27, 2026 through '
+        "Jan 28, 2026, UTC time.</requested_range>\n\n"
+        '<meetings_data connected_user_email="oat@granola.ai" '
+        'workspace_name="Yoghurt Co" from="Jan 27, 2026" to="Jan 28, 2026" '
+        'count="2" flag_defaults="captured_by_me=true listed_as_participant=true '
+        'is_workspace_visible=false" url_template="https://notes.granola.ai/d/{id}">\n'
+        f'<meeting id="{UUID_A}" title="Quarterly yoghurt budget: review" '
+        f'meeting_at="2026-01-27T09:30:00-06:00" organizer="oat@granola.ai">\n'
+        f"    <known_participants>\n"
+        f"    Oat Benson (note creator) &lt;oat@granola.ai&gt;, "
+        f"Milk Jones &lt;milk@granola.ai&gt;\n"
+        f"    </known_participants>\n"
+        f"    <folders>\n"
+        f'    <folder id="{FOLDER_ID}" title="Projects" />\n'
+        f"    </folders>\n"
+        f"  </meeting>\n\n"
+        f'<meeting id="{UUID_B}" title="Yoghurt &amp; Granola sync" '
+        f'meeting_at="2026-01-28T20:00:00.000-05:00" organizer="oat@granola.ai" '
+        f'listed_as_participant="false" is_workspace_visible="true">\n'
+        f"    <known_participants>\n"
+        f"    Oat Benson (note creator) &lt;oat@granola.ai&gt;\n"
+        f"    </known_participants>\n"
+        f"  </meeting>\n"
+        f"</meetings_data>\n\n"
+        f"<duplicate_recordings>\n"
+        f'<meeting id="{UUID_A}" other_ids="{UUID_C}" />\n'
+        f"</duplicate_recordings>"
+    )
+
+
+@pytest.fixture
+def mcp_current_detail_text() -> str:
+    """A ``get_meetings`` response in the shape the server sends now.
+
+    Returns:
+        The verbatim tool output.
+    """
+    return (
+        "<connected_user_email>oat@granola.ai</connected_user_email>\n\n"
+        + MCP_PREAMBLE
+        + (
+            f'<meetings_data from="Jan 27, 2026" to="Jan 27, 2026" count="1">\n'
+            f'<meeting id="{UUID_A}" title="Quarterly yoghurt budget: review" '
+            f'meeting_at="2026-01-27T09:30:00-06:00" '
+            f'created_at="2026-01-27T09:31:02-06:00" '
+            f'updated_at="2026-01-27T10:15:40.120-06:00" '
+            f'url="https://notes.granola.ai/d/{UUID_A}" organizer="oat@granola.ai">\n'
+            f"  <known_participants>\n"
+            f"  Oat Benson (note creator) &lt;oat@granola.ai&gt;\n"
+            f"  </known_participants>\n"
+            f"  <folders>\n"
+            f'  <folder id="{FOLDER_ID}" title="Projects" />\n'
+            f"  </folders>\n"
+            f'  <private_notes status="empty" />\n'
+            f'  <transcript available="true">Read it with get_meeting_transcript.'
+            f"</transcript>\n"
+            f"  <summary>\n"
+            f"### Decisions\n\n"
+            f"- Approved the budget.\n"
+            f"  </summary>\n"
+            f"  <context_for_agents>Oat runs the budget.</context_for_agents>\n"
+            f"  <attachments/>\n"
+            f"</meeting>\n"
+            f"</meetings_data>"
+        )
+    )
 
 
 @pytest.fixture

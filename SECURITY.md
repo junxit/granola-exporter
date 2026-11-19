@@ -79,11 +79,14 @@ meeting transcripts to disk, so the concerns that matter most are:
   rather than by configuring a parser correctly. Document type and entity
   declarations are rejected outright and responses are size-capped.
 - **Silent truncation.** For an archival tool, quietly archiving less than
-  exists is a security-relevant failure. The MCP has no pagination, so the
-  envelope's declared `count` is reconciled against the elements parsed and any
-  mismatch raises; an unparseable response raises rather than looking like an
-  empty window; and oversized listings are bisected, with anything still at the
-  cap reported as possibly incomplete.
+  exists is a security-relevant failure. The envelope's declared `count` is
+  reconciled against the elements parsed and any mismatch raises; an
+  unparseable response raises rather than looking like an empty window; a paged
+  listing is followed to its last page and checked against the server's total,
+  while one that is not paged is bisected when oversized, with anything short
+  or still at the cap reported as possibly incomplete; and a paged transcript
+  is followed to its last page, with a cursor that does not advance raising
+  rather than ending the transcript early.
 - **Local index tampering.** `index.json` is treated as untrusted input; entries
   resolving outside the archive root are refused rather than followed.
 

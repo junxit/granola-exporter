@@ -31,7 +31,13 @@ from . import __version__
 from .models import SOURCE_MCP
 from .public_api import GranolaAPIError, PublicAPIClient
 from .store import Archive
-from .sync import SyncOptions, scan_mcp_meeting_ids, sync_mcp, sync_public_api
+from .sync import (
+    SyncOptions,
+    scan_mcp_meeting_ids,
+    sync_mcp,
+    sync_public_api,
+    transcripts_to_recheck,
+)
 
 DEFAULT_ARCHIVE = "./archive"
 DEFAULT_MCP_URL = "https://mcp.granola.ai/mcp"
@@ -757,6 +763,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
     kept = [k for k, v in index.items() if v.get("transcript_upstream_missing")]
     if kept:
         print(f"  transcript-missing : {len(kept)} (retained locally)")
+    unchecked = transcripts_to_recheck(index)
+    if unchecked:
+        print(
+            f"  transcript-recheck : {len(unchecked)} (archived before paging, "
+            "may be cut short; sync re-checks them)"
+        )
+    partial = [
+        k
+        for k, v in index.items()
+        if isinstance(v.get("mcp"), dict) and v["mcp"].get("transcript_complete") is False
+    ]
+    if partial:
+        print(f"  transcript-partial : {len(partial)} (kept; Granola serves a different one)")
 
     folders: dict[str, int] = {}
     for entry in index.values():
