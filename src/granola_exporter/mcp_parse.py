@@ -92,6 +92,13 @@ _CREATOR_SUFFIX_RE = re.compile(r"\s*\(note creator\)$")
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 _WS_RE = re.compile(r"\s+")
 
+# `get_meetings` carries background the server writes for an AI reader -- who
+# the people are, how their names are spelled -- and rewrites from one call to
+# the next. It is archived with the rest, but it is not the note.
+_AGENT_CONTEXT_RE = re.compile(
+    r"<context_for_agents\b[^>]*>.*?</context_for_agents>", re.DOTALL
+)
+
 
 class MCPResponseFormatError(RuntimeError):
     """Raised when an MCP tool response does not match the expected shape."""
@@ -633,6 +640,25 @@ def listing_hash(element_text: str) -> str:
     """
     normalized = _WS_RE.sub(" ", element_text).strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def stable_content(archived: dict[str, Any]) -> dict[str, Any]:
+    """The archived tool output as change detection should see it.
+
+    Left in, background the server rewrites on every call would make an
+    unchanged note look updated each time it is read, rewriting it on every
+    sync. It stays in ``raw.json`` -- as of the note's last real change.
+
+    Args:
+        archived: The ``mcp`` block of a ``raw.json`` payload.
+
+    Returns:
+        A copy with the server's ``<context_for_agents>`` left out.
+    """
+    return {
+        key: _AGENT_CONTEXT_RE.sub("", value) if isinstance(value, str) else value
+        for key, value in archived.items()
+    }
 
 
 SPEAKER_LABEL_MAX_LEN = 40

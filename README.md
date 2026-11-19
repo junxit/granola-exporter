@@ -372,7 +372,10 @@ API key, use it — this backend exists for accounts that cannot get one.
 - **No `updated_at` in the listing.** Change detection is rebuilt from what the
   listing does return: a hash of each `<meeting>` element stands in for the
   stub's `updated_at`. That catches retitles, date changes and participant
-  changes.
+  changes. A note that is read again is rewritten only when its content
+  changed: the `<context_for_agents>` background that `get_meetings` rewrites
+  on every call is archived, as of the note's last real change, but never
+  counted as one.
 - **Edits to older meetings lag.** An incremental run rescans a trailing window
   (31 days by default, `--window`) and also re-reads up to 30 older archived
   notes (`--refresh-batch`): those still missing a transcript first, then those
@@ -474,6 +477,12 @@ API key, use it — this backend exists for accounts that cannot get one.
   kept (`transcript-partial`). A plain `sync` re-checks the trailing window and
   up to `--refresh-batch` older notes per run; `sync --full` re-checks every
   one it lists.
+- **A transcript not ready yet is not archived as empty.** When the server
+  says a transcript is still being processed (`transcript_pending`) or the
+  meeting has not happened (`not_happened_yet`), the note is archived without
+  one and later syncs fetch it, as after any failed fetch. Only the server's
+  final reasons, `no_transcript` and `transcript_deleted`, are archived as an
+  empty transcript, which is never asked for again.
 
 ### How the two backends join up
 

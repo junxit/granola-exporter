@@ -613,6 +613,93 @@ def test_an_empty_transcript_is_not_refetched(tmp_path):
     assert counts.updated == 0
 
 
+class _Unavailable(FakeMCP):
+    """Serves no transcript, giving the server's reason, until told otherwise."""
+
+    reason: str | None = "transcript_pending"
+
+    def get_meeting_transcript(self, meeting_id):
+        """Report the transcript unavailable while a reason is set."""
+        if self.reason is None:
+            return super().get_meeting_transcript(meeting_id)
+        self.calls.append(("get_meeting_transcript", (meeting_id,)))
+        return {
+            "id": meeting_id,
+            "title": self.meetings[meeting_id][1],
+            "transcript": None,
+            "transcript_unavailable": {"reason": self.reason},
+        }
+
+
+@pytest.mark.parametrize("reason", ["transcript_pending", "not_happened_yet"])
+def test_a_transcript_not_ready_yet_is_fetched_later(tmp_path, capsys, reason):
+    """A meeting synced as it ends must not be archived as having none for good."""
+    fake = _Unavailable([(_uuid(1), "Just ended", date(2026, 8, 5))])
+    fake.reason = reason
+    opts = SyncOptions(since=date(2026, 7, 1))
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert counts.transcripts_failed == 1
+    assert "not ready yet" in capsys.readouterr().err
+    entry = Archive(tmp_path).load_index()[f"mcp_{_uuid(1)}"]
+    assert entry["mcp"]["transcript_fetched_at"] is None, "not fetched, so retried"
+
+    fake.reason = None
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert Archive(tmp_path).load_index()[f"mcp_{_uuid(1)}"]["has_transcript"] is True
+
+
+def test_background_written_for_agents_is_not_a_change(tmp_path):
+    """Regression: the server rewrites its agent context on every call.
+
+    Hashed with the rest, it made every note read look updated, so each sync
+    rewrote every note in its trailing window.
+    """
+
+    class Chatty(FakeMCP):
+        def get_meetings(self, meeting_ids):
+            """Add agent context that differs on every call."""
+            call = self.count("get_meetings")
+            return super().get_meetings(meeting_ids).replace(
+                "  </meeting>",
+                f"  <context_for_agents>Written for call {call}.</context_for_agents>\n"
+                "  </meeting>",
+            )
+
+    fake = Chatty([(_uuid(1), "Yoghurt sync", date(2026, 8, 1))])
+    opts = SyncOptions(since=date(2026, 7, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meetings") == 2, "the note in the window is read again"
+    assert (counts.updated, counts.unchanged) == (0, 1)
+    archive = Archive(tmp_path)
+    raw = json.loads(
+        (archive.root / archive.load_index()[f"mcp_{_uuid(1)}"]["path"] / "raw.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    element = raw["mcp"]["get_meetings_element"]
+    assert "Written for call 0." in element, "archived as of the note's last real change"
+    assert "Written for call 1." not in element
+
+
+@pytest.mark.parametrize("reason", ["no_transcript", "transcript_deleted"])
+def test_a_transcript_that_will_never_come_is_not_asked_for_again(tmp_path, reason):
+    """The server's final reasons are an empty transcript, as before."""
+    fake = _Unavailable([(_uuid(1), "Silent", date(2026, 8, 1))])
+    fake.reason = reason
+    opts = SyncOptions(since=date(2026, 7, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meeting_transcript") == 1
+    assert counts.transcripts_failed == 0
+
+
 # -- batching and windowing ------------------------------------------------
 
 

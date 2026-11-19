@@ -31,6 +31,7 @@ from .mcp_parse import (
     parse_meetings_listing,
     parse_transcript,
     split_transcript,
+    stable_content,
 )
 from .models import (
     MCP_KEY_PREFIX,
@@ -1405,8 +1406,10 @@ def _write_mcp_meetings(
             }
 
             # Hash only the verbatim tool output. Hashing the wrapper would let
-            # a parser-version bump rewrite every directory in the archive.
-            digest = content_hash(raw["mcp"])
+            # a parser-version bump rewrite every directory in the archive, and
+            # hashing the server's ever-changing agent context would rewrite a
+            # note every time it is read.
+            digest = content_hash(stable_content(raw["mcp"]))
             if archive.is_unchanged(key, digest):
                 # Record the check anyway: without it the rolling refresh kept
                 # picking the same unchanged notes on every run.
@@ -1431,6 +1434,16 @@ def _write_mcp_meetings(
     return failed
 
 
+class TranscriptNotReady(RuntimeError):
+    """Raised when the server says a transcript exists but is not ready yet."""
+
+
+# Reasons the server gives for serving no transcript *yet*. Any other reason --
+# `no_transcript`, `transcript_deleted` -- is final, and an empty transcript is
+# archived as before.
+_TRANSCRIPT_DUE = frozenset({"transcript_pending", "not_happened_yet"})
+
+
 def _fetch_transcript(client: MCPProtocol, meeting_id: str) -> MCPTranscript:
     """Fetch and parse one meeting's transcript.
 
@@ -1442,10 +1455,18 @@ def _fetch_transcript(client: MCPProtocol, meeting_id: str) -> MCPTranscript:
         The transcript.
 
     Raises:
+        TranscriptNotReady: If the server serves none yet, as for a meeting
+            that has only just ended. Archiving that as empty would be final:
+            an empty transcript is never fetched again.
         ValueError: If it came back for another meeting. One meeting's words
             are never filed under another's.
     """
-    transcript = parse_transcript(client.get_meeting_transcript(meeting_id))
+    payload = client.get_meeting_transcript(meeting_id)
+    unavailable = payload.get("transcript_unavailable") if isinstance(payload, dict) else None
+    reason = unavailable.get("reason") if isinstance(unavailable, dict) else unavailable
+    if reason in _TRANSCRIPT_DUE and not str(payload.get("transcript") or "").strip():
+        raise TranscriptNotReady(f"transcript not ready yet ({reason}); a later sync fetches it")
+    transcript = parse_transcript(payload)
     if transcript.meeting_id != meeting_id:
         raise ValueError(
             f"asked for {meeting_id}, got a transcript for {transcript.meeting_id}"
@@ -1527,9 +1548,9 @@ def _recheck_transcript(
         counts.transcripts_completed += 1
         return fresh, True, True
     counts.transcripts_kept += 1
+    upstream = "a different transcript" if fresh.text.strip() else "no transcript"
     print(
-        f"  WARN  {key}: Granola serves a different transcript than the "
-        "archived one — keeping the archived one",
+        f"  WARN  {key}: Granola now serves {upstream} — keeping the archived one",
         file=sys.stderr,
     )
     return archived, False, False

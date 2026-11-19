@@ -26,6 +26,12 @@ Changelog
   A plain sync re-checks the trailing window and up to --refresh-batch older
   notes per run, after any still missing a transcript; sync --full re-checks
   every note it lists.
+- A transcript that is not ready yet is no longer archived as empty. The
+  server now says why it serves none: transcript_pending and
+  not_happened_yet mean later, and a meeting synced as it ended was archived
+  with an empty transcript that was never asked for again. Those are now
+  retried by later syncs; only no_transcript and transcript_deleted are
+  archived as empty.
 - MCP listings are paged now too. Each window is followed by its cursor to
   the last page and checked against the total the server reports, and a
   window that comes up short is reported as possibly incomplete. Bisection
@@ -35,6 +41,11 @@ Changelog
   only in duplicate_recordings. Each is a note of its own, and is now
   archived and filed in its folders; a full scan no longer flags one already
   in the archive as gone from upstream.
+- A note read again without changes is no longer rewritten. get_meetings
+  now carries context_for_agents, background the server rewrites on every
+  call; counted in the content hash, it made every note look updated, so each
+  sync rewrote every note in its trailing window. It is still archived, as
+  of the note's last real change.
 - A flag a meeting leaves to the listing's flag_defaults takes that default
   instead of reading as unknown, and listing dates are sent under the names
   the server documents, from_date and to_date.
