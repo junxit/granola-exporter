@@ -49,6 +49,11 @@ Changelog
 - A flag a meeting leaves to the listing's flag_defaults takes that default
   instead of reading as unknown, and listing dates are sent under the names
   the server documents, from_date and to_date.
+- Dev tools, the build backend and the CI actions move to their current
+  releases; the runtime dependencies are unchanged. pytest moves from 9.1.1
+  to 9.2.0, ruff from 0.17.1 to 0.17.5 and hatchling from 1.32.4 to 1.33.0
+  (#17). In CI, setup-uv moves from 10.3.0 to 10.3.3 and osv-scanner-action
+  from 2.7.0 to 2.7.1 (#19). Merged from Dependabot.
 
 0.6.4
 -----
