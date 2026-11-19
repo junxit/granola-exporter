@@ -12,16 +12,17 @@ from datetime import date, timedelta
 
 import pytest
 
-from granola_exporter.mcp_parse import MCPResponseFormatError
+from granola_exporter.mcp_parse import PARSER_VERSION, MCPResponseFormatError
 from granola_exporter.models import SOURCE_MCP, SOURCE_PUBLIC_API, Note
 from granola_exporter.render import render_note, render_transcript
-from granola_exporter.store import Archive
+from granola_exporter.store import Archive, content_hash
 from granola_exporter.sync import (
     SUSPICIOUS_RESULT_COUNT,
     TRANSCRIPT_GIVEUP_STREAK,
     SyncOptions,
     sync_mcp,
     sync_public_api,
+    transcripts_to_recheck,
 )
 
 TODAY = date(2026, 8, 6)
@@ -45,19 +46,42 @@ def _uuid(n: int) -> str:
 
 
 class FakeMCP:
-    """An in-memory MCP backend built from a list of meetings."""
+    """An in-memory MCP backend built from a list of meetings.
 
-    def __init__(self, meetings, folders=None, transcripts=None) -> None:
+    ``shape="legacy"`` renders responses as the server first sent them: a
+    localized ``date``, no pagination, no duplicate groups. ``"current"``
+    renders them as it sends them now: an ISO ``meeting_at``, flags left to
+    ``flag_defaults``, a ``<pagination>`` element, and the other captures of
+    an event named in ``<duplicate_recordings>``.
+    """
+
+    def __init__(
+        self,
+        meetings,
+        folders=None,
+        transcripts=None,
+        *,
+        shape="legacy",
+        page_size=None,
+        duplicates=None,
+    ) -> None:
         """Initialize the fake.
 
         Args:
             meetings: ``(uuid, title, date)`` triples.
             folders: ``{folder_name: [uuid, ...]}``.
             transcripts: ``{uuid: flat transcript string}``.
+            shape: ``"legacy"`` or ``"current"``.
+            page_size: Meetings per listing page; ``None`` for one page.
+            duplicates: ``{uuid: listed_uuid}`` -- meetings listed only as
+                another capture of the listed one.
         """
         self.meetings = {m[0]: m for m in meetings}
         self.folders = folders or {}
         self.transcripts = transcripts or {}
+        self.shape = shape
+        self.page_size = page_size
+        self.duplicates = duplicates or {}
         self.calls: list[tuple[str, tuple]] = []
 
     # -- helpers -----------------------------------------------------------
@@ -78,9 +102,12 @@ class FakeMCP:
             if summary
             else ""
         )
+        if self.shape == "current":
+            dated = f'meeting_at="{when.isoformat()}T09:30:00-06:00" organizer="oat@granola.ai"'
+        else:
+            dated = f'date="{when.strftime("%b %-d, %Y")} 9:30 AM CST"'
         return (
-            f'<meeting id="{uuid}" title="{title}" '
-            f'date="{when.strftime("%b %-d, %Y")} 9:30 AM CST">\n'
+            f'<meeting id="{uuid}" title="{title}" {dated}>\n'
             f"    <known_participants>\n"
             f"    Oat Benson (note creator) &lt;oat@granola.ai&gt;\n"
             f"    </known_participants>\n"
@@ -88,23 +115,67 @@ class FakeMCP:
             f"  </meeting>"
         )
 
-    def _wrap(self, uuids, *, summary: bool = False) -> str:
+    def _wrap(self, uuids, *, summary: bool = False, head: str = "", tail: str = "") -> str:
         """Wrap elements in a ``meetings_data`` envelope.
 
         Args:
             uuids: Meeting ids to include.
             summary: Whether to include summaries.
+            head: Text before the root, such as a ``<pagination>`` element.
+            tail: Text after it, such as ``<duplicate_recordings>``.
 
         Returns:
             The full tool response.
         """
         elements = "\n".join(self._element(u, summary=summary) for u in uuids)
+        defaults = (
+            ' flag_defaults="captured_by_me=true listed_as_participant=true '
+            'is_workspace_visible=false"'
+            if self.shape == "current"
+            else ""
+        )
         return (
             PREAMBLE
-            + f'<meetings_data from="x" to="y" count="{len(uuids)}">\n'
+            + head
+            + f'<meetings_data from="x" to="y" count="{len(uuids)}"{defaults}>\n'
             + elements
             + "\n</meetings_data>"
+            + tail
         )
+
+    def _page(self, hits: list[str], cursor: str | None) -> str:
+        """Render one page of a current-shape listing.
+
+        Args:
+            hits: Every meeting the listing matches, hidden duplicates included.
+            cursor: The cursor asked for.
+
+        Returns:
+            The full tool response for that page.
+        """
+        hidden = {u for u in hits if self.duplicates.get(u) in hits}
+        listed = [u for u in hits if u not in hidden]
+        start = int(cursor or 0)
+        size = self.page_size or len(listed) or 1
+        page = listed[start : start + size]
+        more = start + size < len(listed)
+        head = (
+            f'<pagination has_more="{str(more).lower()}" total_count="{len(listed)}" '
+            f'remaining_count="{max(0, len(listed) - start - size)}"'
+            + (f' next_cursor="{start + size}"' if more else "")
+            + " />\n\n"
+        )
+        groups = [
+            f'<meeting id="{kept}" other_ids="{",".join(sorted(o for o in hidden if self.duplicates[o] == kept))}" />'
+            for kept in page
+            if any(self.duplicates[o] == kept for o in hidden)
+        ]
+        tail = (
+            "\n\n<duplicate_recordings>\n" + "\n".join(groups) + "\n</duplicate_recordings>"
+            if groups
+            else ""
+        )
+        return self._wrap(page, head=head, tail=tail)
 
     # -- MCPProtocol -------------------------------------------------------
 
@@ -123,7 +194,13 @@ class FakeMCP:
         ]
 
     def list_meetings(
-        self, *, custom_start=None, custom_end=None, time_range="custom", folder_id=None
+        self,
+        *,
+        custom_start=None,
+        custom_end=None,
+        time_range="custom",
+        folder_id=None,
+        cursor=None,
     ):
         """List meetings in a window, optionally restricted to a folder."""
         self.calls.append(("list_meetings", (custom_start, custom_end, folder_id)))
@@ -137,6 +214,8 @@ class FakeMCP:
             if custom_start <= when <= custom_end
             and (allowed is None or u in allowed)
         ]
+        if self.shape == "current":
+            return self._page(sorted(hits), cursor)
         return self._wrap(sorted(hits))
 
     def get_meetings(self, meeting_ids):
@@ -532,6 +611,93 @@ def test_an_empty_transcript_is_not_refetched(tmp_path):
 
     assert fake.count("get_meeting_transcript") == 1
     assert counts.updated == 0
+
+
+class _Unavailable(FakeMCP):
+    """Serves no transcript, giving the server's reason, until told otherwise."""
+
+    reason: str | None = "transcript_pending"
+
+    def get_meeting_transcript(self, meeting_id):
+        """Report the transcript unavailable while a reason is set."""
+        if self.reason is None:
+            return super().get_meeting_transcript(meeting_id)
+        self.calls.append(("get_meeting_transcript", (meeting_id,)))
+        return {
+            "id": meeting_id,
+            "title": self.meetings[meeting_id][1],
+            "transcript": None,
+            "transcript_unavailable": {"reason": self.reason},
+        }
+
+
+@pytest.mark.parametrize("reason", ["transcript_pending", "not_happened_yet"])
+def test_a_transcript_not_ready_yet_is_fetched_later(tmp_path, capsys, reason):
+    """A meeting synced as it ends must not be archived as having none for good."""
+    fake = _Unavailable([(_uuid(1), "Just ended", date(2026, 8, 5))])
+    fake.reason = reason
+    opts = SyncOptions(since=date(2026, 7, 1))
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert counts.transcripts_failed == 1
+    assert "not ready yet" in capsys.readouterr().err
+    entry = Archive(tmp_path).load_index()[f"mcp_{_uuid(1)}"]
+    assert entry["mcp"]["transcript_fetched_at"] is None, "not fetched, so retried"
+
+    fake.reason = None
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    assert Archive(tmp_path).load_index()[f"mcp_{_uuid(1)}"]["has_transcript"] is True
+
+
+def test_background_written_for_agents_is_not_a_change(tmp_path):
+    """Regression: the server rewrites its agent context on every call.
+
+    Hashed with the rest, it made every note read look updated, so each sync
+    rewrote every note in its trailing window.
+    """
+
+    class Chatty(FakeMCP):
+        def get_meetings(self, meeting_ids):
+            """Add agent context that differs on every call."""
+            call = self.count("get_meetings")
+            return super().get_meetings(meeting_ids).replace(
+                "  </meeting>",
+                f"  <context_for_agents>Written for call {call}.</context_for_agents>\n"
+                "  </meeting>",
+            )
+
+    fake = Chatty([(_uuid(1), "Yoghurt sync", date(2026, 8, 1))])
+    opts = SyncOptions(since=date(2026, 7, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meetings") == 2, "the note in the window is read again"
+    assert (counts.updated, counts.unchanged) == (0, 1)
+    archive = Archive(tmp_path)
+    raw = json.loads(
+        (archive.root / archive.load_index()[f"mcp_{_uuid(1)}"]["path"] / "raw.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    element = raw["mcp"]["get_meetings_element"]
+    assert "Written for call 0." in element, "archived as of the note's last real change"
+    assert "Written for call 1." not in element
+
+
+@pytest.mark.parametrize("reason", ["no_transcript", "transcript_deleted"])
+def test_a_transcript_that_will_never_come_is_not_asked_for_again(tmp_path, reason):
+    """The server's final reasons are an empty transcript, as before."""
+    fake = _Unavailable([(_uuid(1), "Silent", date(2026, 8, 1))])
+    fake.reason = reason
+    opts = SyncOptions(since=date(2026, 7, 1))
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert fake.count("get_meeting_transcript") == 1
+    assert counts.transcripts_failed == 0
 
 
 # -- batching and windowing ------------------------------------------------
@@ -1063,7 +1229,7 @@ def test_state_is_namespaced_and_leaves_the_watermark_alone(tmp_path):
     mcp_state = reopened.source_state(SOURCE_MCP)
     assert mcp_state["scanned_through"] == TODAY.isoformat()
     assert mcp_state["earliest_scanned"] == "2026-07-01"
-    assert mcp_state["parser_version"] == 1
+    assert mcp_state["parser_version"] == PARSER_VERSION
 
 
 def test_second_run_uses_the_trailing_window(tmp_path):
@@ -1180,3 +1346,358 @@ def test_giving_up_leaves_the_notes_retryable(tmp_path):
     assert fake.count("get_meeting_transcript") == 6, "all six are retried"
     assert counts.transcripts_failed == 0
     assert counts.transcripts_deferred == 0
+
+
+# -- the current listing shape ---------------------------------------------
+
+
+def _pair(**kwargs) -> tuple[FakeMCP, str, str]:
+    """Build a current-shape fake holding two captures of one event.
+
+    Args:
+        **kwargs: Passed to :class:`FakeMCP`.
+
+    Returns:
+        The fake, the listed meeting's id and the other capture's id.
+    """
+    listed, other = _uuid(1), _uuid(2)
+    fake = FakeMCP(
+        [(listed, "Yoghurt sync", date(2026, 8, 1)), (other, "Yoghurt sync", date(2026, 8, 1))],
+        shape="current",
+        duplicates={other: listed},
+        **kwargs,
+    )
+    return fake, listed, other
+
+
+def test_the_current_listing_shape_is_archived(tmp_path):
+    """Regression: a listing dated by ``meeting_at`` alone stopped every sync."""
+    fake = FakeMCP([(_uuid(1), "Yoghurt sync", date(2026, 8, 1))], shape="current")
+    archive = Archive(tmp_path)
+
+    counts = sync_mcp(archive, fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+
+    assert counts.new == 1
+    entry = archive.load_index()[f"mcp_{_uuid(1)}"]
+    assert entry["path"].startswith("2026/08/2026-08-01--"), "09:30 at -06:00 is 15:30 UTC"
+    assert entry["mcp"]["date_text"] == "2026-08-01T09:30:00-06:00"
+    assert entry["mcp"]["tz_resolved"] is True
+    assert entry["mcp"]["transcript_complete"] is True
+    note_md = (archive.root / entry["path"] / "note.md").read_text(encoding="utf-8")
+    assert "2026-08-01T09:30:00-06:00" in note_md, "the server's time is shown verbatim"
+
+
+def test_a_paged_listing_is_followed_to_the_last_page(tmp_path):
+    """Every page is read, and a long one is not mistaken for a capped one."""
+    day = date(2026, 8, 1)
+    meetings = [(_uuid(n), f"Sync {n}", day) for n in range(1, SUSPICIOUS_RESULT_COUNT + 11)]
+    fake = FakeMCP(meetings, shape="current", page_size=25)
+    archive = Archive(tmp_path)
+
+    counts = sync_mcp(archive, fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+
+    assert counts.new == len(meetings)
+    assert counts.truncated_windows == 0
+    windows = {args[:2] for name, args in fake.calls if name == "list_meetings"}
+    assert len(windows) == 1, "a paged window is never bisected"
+    assert fake.count("list_meetings") == 3, "sixty meetings at twenty-five a page"
+
+
+def test_a_listing_short_of_its_total_is_reported(tmp_path, capsys):
+    """Fewer meetings than the server counts is a gap, said out loud."""
+
+    class Short(FakeMCP):
+        def list_meetings(self, **kwargs):
+            """Claim one more meeting than the page delivers."""
+            return super().list_meetings(**kwargs).replace(
+                'total_count="1"', 'total_count="2"'
+            )
+
+    fake = Short([(_uuid(1), "Yoghurt sync", date(2026, 8, 1))], shape="current")
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+
+    assert counts.truncated_windows == 1
+    assert "listed 1 of the 2 meetings" in capsys.readouterr().err
+
+
+def test_a_meeting_listed_only_as_a_duplicate_is_archived(tmp_path):
+    """Another capture of a listed meeting's event is a note of its own."""
+    fake, listed, other = _pair()
+    archive = Archive(tmp_path)
+
+    counts = sync_mcp(archive, fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+
+    assert counts.new == 2
+    assert other in _requested(fake), "its details come from get_meetings"
+    entry = archive.load_index()[f"mcp_{other}"]
+    raw = json.loads((archive.root / entry["path"] / "raw.json").read_text(encoding="utf-8"))
+    assert raw["mcp"]["list_meetings_element"] == (
+        f'<meeting id="{listed}" other_ids="{other}" />'
+    ), "the listing's own words for it are archived"
+    assert raw["mcp"]["get_meeting_transcript"]["id"] == other
+
+
+def test_a_full_scan_does_not_flag_a_note_now_listed_as_a_duplicate(tmp_path):
+    """Regression: a note the server now groups with another looked deleted."""
+    listed, other, older = _uuid(1), _uuid(2), _uuid(3)
+    fake = FakeMCP(
+        [
+            (listed, "Yoghurt sync", date(2026, 8, 1)),
+            (other, "Yoghurt sync", date(2026, 8, 1)),
+            (older, "Granola review", date(2026, 7, 20)),
+        ]
+    )
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+
+    fake.shape, fake.duplicates = "current", {other: listed}
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(full=True), today=TODAY)
+
+    index = Archive(tmp_path).load_index()
+    assert index[f"mcp_{other}"]["upstream_missing"] is False
+
+
+def test_a_duplicate_is_filed_in_its_folders(tmp_path):
+    """A folder's listing names its duplicates too, so they are filed."""
+    fake, listed, other = _pair(folders={"Projects": [_uuid(1), _uuid(2)]})
+    archive = Archive(tmp_path)
+
+    sync_mcp(archive, fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+
+    assert archive.load_index()[f"mcp_{other}"]["folders"] == ["Projects"]
+
+
+# -- transcripts archived before paging ------------------------------------
+
+LONG = " Them: " + "the budget doubled again and nobody minded. " * 40 + " Me: noted. "
+
+
+def _as_left_by_an_older_version(tmp_path, key: str, *, keep: int | None = None) -> None:
+    """Make an archived MCP note look as an older version left it.
+
+    Older versions recorded no ``transcript_complete``, and kept only the
+    first page of a transcript that ran longer.
+
+    Args:
+        tmp_path: The archive root.
+        key: The note's archive key.
+        keep: Characters of the transcript to keep; ``None`` keeps it whole.
+    """
+    archive = Archive(tmp_path)
+    entry = archive.load_index()[key]
+    entry["mcp"].pop("transcript_complete", None)
+    if keep is not None:
+        path = archive.root / entry["path"] / "raw.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        block = raw["mcp"]["get_meeting_transcript"]
+        block["transcript"] = block["transcript"][:keep]
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        entry["content_hash"] = content_hash(raw["mcp"])
+    archive.save_index()
+
+
+def _archived_text(tmp_path, key: str) -> str:
+    """Read an archived note's transcript text back from ``raw.json``.
+
+    Args:
+        tmp_path: The archive root.
+        key: The note's archive key.
+
+    Returns:
+        The flat transcript.
+    """
+    archive = Archive(tmp_path)
+    path = archive.root / archive.load_index()[key]["path"] / "raw.json"
+    return json.loads(path.read_text(encoding="utf-8"))["mcp"]["get_meeting_transcript"][
+        "transcript"
+    ]
+
+
+def test_a_transcript_archived_cut_short_is_completed(tmp_path, capsys):
+    """Regression: older versions kept only the first page of a long transcript.
+
+    Nothing marked it, and an archived transcript is never refetched, so it
+    would have stayed short for good.
+    """
+    uuid, key = _uuid(1), f"mcp_{_uuid(1)}"
+    fake = FakeMCP([(uuid, "Yoghurt sync", date(2026, 8, 1))], transcripts={uuid: LONG})
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+    _as_left_by_an_older_version(tmp_path, key, keep=len(LONG) // 2)
+    assert transcripts_to_recheck(Archive(tmp_path).load_index()) == [key]
+
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    assert counts.transcripts_completed == 1
+    assert counts.updated == 1
+    assert _archived_text(tmp_path, key) == LONG
+    archive = Archive(tmp_path)
+    entry = archive.load_index()[key]
+    assert entry["mcp"]["transcript_complete"] is True
+    assert "noted." in (archive.root / entry["path"] / "transcript.md").read_text(
+        encoding="utf-8"
+    ), "the rest of the meeting is rendered too"
+    assert "now complete" in capsys.readouterr().out
+    assert transcripts_to_recheck(archive.load_index()) == []
+
+
+def test_a_full_scan_rechecks_a_transcript_outside_the_window(tmp_path):
+    """An unchanged listing does not settle a note whose transcript is due a check."""
+    uuid, key = _uuid(1), f"mcp_{_uuid(1)}"
+    fake = FakeMCP([(uuid, "Yoghurt sync", date(2026, 6, 1))], transcripts={uuid: LONG})
+    opts = SyncOptions(full=True, since=date(2026, 5, 1), refresh_batch=0)
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+    _as_left_by_an_older_version(tmp_path, key, keep=len(LONG) // 2)
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    assert counts.transcripts_completed == 1, "found by the scan, not the refresh"
+    assert _archived_text(tmp_path, key) == LONG
+
+
+def test_transcripts_from_before_paging_are_whole_without_a_request(tmp_path):
+    """One longer than a page proves the server was not paging when it was fetched.
+
+    So is everything fetched before it -- including a transcript Granola has
+    since rendered differently, which a comparison would only call different.
+    """
+    early, proof, later = _uuid(1), _uuid(2), _uuid(3)
+    longer_than_a_page = " Them: " + "the budget doubled again. " * 1800
+    fake = FakeMCP(
+        [
+            (early, "Kickoff", date(2026, 6, 1)),
+            (proof, "Planning", date(2026, 6, 2)),
+            (later, "Review", date(2026, 6, 3)),
+        ],
+        transcripts={proof: longer_than_a_page},
+    )
+    opts = SyncOptions(full=True, since=date(2026, 5, 1), refresh_batch=0)
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    archive = Archive(tmp_path)
+    for uuid, stamp in (
+        (early, "2026-06-01T10:00:00+00:00"),
+        (proof, "2026-06-02T10:00:00+00:00"),
+        (later, "2026-06-03T10:00:00+00:00"),
+    ):
+        block = archive.load_index()[f"mcp_{uuid}"]["mcp"]
+        block.pop("transcript_complete")
+        block["transcript_fetched_at"] = stamp
+    archive.save_index()
+    fake.transcripts[early] = "Microphone: rendered another way since."
+    fake.calls.clear()
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    index = Archive(tmp_path).load_index()
+    assert all(
+        index[f"mcp_{u}"]["mcp"]["transcript_complete"] is True for u in (early, proof, later)
+    )
+    assert _requested_transcripts(fake) == [later], "only the one fetched after the proof"
+    assert counts.transcripts_kept == 0, "the re-rendered one is never compared"
+
+
+def _requested_transcripts(fake: FakeMCP) -> list[str]:
+    """Every meeting id sent to get_meeting_transcript, in order.
+
+    Args:
+        fake: The fake backend.
+
+    Returns:
+        The meeting ids.
+    """
+    return [args[0] for name, args in fake.calls if name == "get_meeting_transcript"]
+
+
+def test_a_whole_archived_transcript_is_checked_once(tmp_path):
+    """Checking costs one fetch, and a transcript found whole is left alone."""
+    uuid, key = _uuid(1), f"mcp_{_uuid(1)}"
+    fake = FakeMCP([(uuid, "Yoghurt sync", date(2026, 8, 1))])
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+    _as_left_by_an_older_version(tmp_path, key)
+
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    assert fake.count("get_meeting_transcript") == 2, "checked once more"
+    assert (counts.unchanged, counts.transcripts_completed) == (1, 0)
+    assert Archive(tmp_path).load_index()[key]["mcp"]["transcript_complete"] is True
+
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+    assert fake.count("get_meeting_transcript") == 2, "and never again"
+
+
+@pytest.mark.parametrize(
+    "upstream", [" Them: an entirely different meeting.  Me: indeed. ", ""]
+)
+def test_a_different_upstream_transcript_never_replaces_the_archived_one(
+    tmp_path, upstream
+):
+    """Archived words are kept unless what Granola serves continues them."""
+    uuid, key = _uuid(1), f"mcp_{_uuid(1)}"
+    fake = FakeMCP([(uuid, "Yoghurt sync", date(2026, 8, 1))], transcripts={uuid: LONG})
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+    _as_left_by_an_older_version(tmp_path, key, keep=len(LONG) // 2)
+    fake.transcripts[uuid] = upstream
+
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+
+    assert _archived_text(tmp_path, key) == LONG[: len(LONG) // 2]
+    assert Archive(tmp_path).load_index()[key]["mcp"]["transcript_complete"] is False
+    assert counts.transcripts_kept == 1
+    assert any("kept as archived" in w for w in counts.warnings())
+
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+    assert fake.count("get_meeting_transcript") == 2, "not asked again"
+
+
+def test_a_failed_recheck_keeps_the_transcript_and_tries_again(tmp_path, capsys):
+    """A check that cannot be made costs nothing and is made next time."""
+    uuid, key = _uuid(1), f"mcp_{_uuid(1)}"
+    fake = FakeMCP([(uuid, "Yoghurt sync", date(2026, 8, 1))], transcripts={uuid: LONG})
+    sync_mcp(Archive(tmp_path), fake, SyncOptions(since=date(2026, 7, 7)), today=TODAY)
+    _as_left_by_an_older_version(tmp_path, key, keep=len(LONG) // 2)
+
+    class Down(FakeMCP):
+        def get_meeting_transcript(self, meeting_id):
+            """Fail every transcript fetch."""
+            raise RuntimeError("upstream unavailable")
+
+    counts = sync_mcp(
+        Archive(tmp_path), Down(list(fake.meetings.values())), SyncOptions(), today=TODAY
+    )
+
+    entry = Archive(tmp_path).load_index()[key]
+    assert "transcript_complete" not in entry["mcp"], "still to be checked"
+    assert entry["has_transcript"] is True
+    assert counts.transcripts_failed == 0, "the note keeps the transcript it had"
+    assert "could not re-check" in capsys.readouterr().err
+
+    counts = sync_mcp(Archive(tmp_path), fake, SyncOptions(), today=TODAY)
+    assert counts.transcripts_completed == 1
+
+
+def test_transcripts_to_recheck_come_after_missing_ones():
+    """The rolling refresh reaches unchecked transcripts before plain re-reads."""
+    from granola_exporter.sync import _old_note_candidates
+
+    def key(n: int) -> str:
+        return f"mcp_{_uuid(n)}"
+
+    fetched = {"transcript_fetched_at": "2026-01-01T00:00:00+00:00"}
+    index = {
+        key(1): {
+            "has_transcript": True,
+            "mcp": {**fetched, "transcript_complete": True,
+                    "detail_fetched_at": "2026-02-01T00:00:00+00:00"},
+        },
+        key(2): {
+            "has_transcript": True,
+            "mcp": {**fetched, "detail_fetched_at": "2026-03-01T00:00:00+00:00"},
+        },
+        key(3): {"mcp": {}},
+        key(4): {
+            "has_transcript": False,
+            "mcp": {**fetched, "detail_fetched_at": "2026-01-15T00:00:00+00:00"},
+        },
+    }
+
+    assert transcripts_to_recheck(index) == [key(2)], "an empty transcript cannot be cut"
+    assert _old_note_candidates(index, set(), limit=10) == [key(3), key(2), key(4), key(1)]

@@ -26,6 +26,7 @@ from granola_exporter.models import SOURCE_MCP
 
 UUID_A = "d290f1ee-6c54-4b01-90e6-d701748f0851"
 UUID_B = "e96c1c66-ed02-4a32-9acd-54720f8761b1"
+UUID_C = "7c4f0a52-3b1e-4d8a-9f60-2e5b8c1d0a93"
 
 
 # -- listing ---------------------------------------------------------------
@@ -103,6 +104,155 @@ def test_oversized_response_is_refused():
     """A payload far larger than any real response is refused."""
     with pytest.raises(MCPResponseFormatError, match="exceeds"):
         parse_meetings_listing("x" * (8 * 1024 * 1024 + 1))
+
+
+# -- the current listing shape ---------------------------------------------
+
+
+def test_current_listing_is_dated_by_meeting_at(mcp_current_listing_text):
+    """Regression: the server dropped ``date``, and every sync stopped.
+
+    Each meeting now carries only an ISO 8601 ``meeting_at``. Requiring
+    ``date`` raised on the first meeting of the first window.
+    """
+    envelope, meetings = parse_meetings_listing(mcp_current_listing_text)
+
+    assert envelope.count == 2
+    assert [m.meeting_id for m in meetings] == [UUID_A, UUID_B]
+    first, second = meetings
+    assert first.date_text == "2026-01-27T09:30:00-06:00"
+    assert second.date_text == "2026-01-28T20:00:00.000-05:00"
+    assert "meeting_at" not in first.unknown_attrs
+    assert first.unknown_attrs == {"organizer": "oat@granola.ai"}
+
+
+def test_flags_left_off_a_meeting_take_the_defaults(mcp_current_listing_text):
+    """A flag matching ``flag_defaults`` is omitted, not unknown."""
+    _, (first, second) = parse_meetings_listing(mcp_current_listing_text)
+
+    assert (first.captured_by_me, first.listed_as_participant) == (True, True)
+    assert first.is_workspace_visible is False
+    assert second.captured_by_me is True, "omitted, so the default"
+    assert second.listed_as_participant is False, "stated, so it wins"
+    assert second.is_workspace_visible is True
+
+
+def test_a_paged_listing_reports_its_cursor(mcp_current_listing_text):
+    """The cursor and total come from the element ahead of the root."""
+    envelope, _ = parse_meetings_listing(mcp_current_listing_text)
+
+    assert envelope.paginated is True
+    assert envelope.has_more is True
+    assert envelope.next_cursor == "cursor-page-2"
+    assert envelope.total_count == 3
+
+
+def test_an_unpaged_listing_reports_no_cursor(mcp_listing_text):
+    """A listing without a pagination element is a single page."""
+    envelope, _ = parse_meetings_listing(mcp_listing_text)
+
+    assert envelope.paginated is False
+    assert envelope.has_more is False
+    assert envelope.total_count is None
+    assert envelope.duplicates == []
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (' next_cursor="cursor-page-2"', ""),
+        ('has_more="true"', 'has_more="maybe"'),
+    ],
+)
+def test_a_cursor_that_cannot_be_followed_raises(mcp_current_listing_text, before, after):
+    """More pages without a way to reach them must not read as the last page."""
+    broken = mcp_current_listing_text.replace(before, after, 1)
+    with pytest.raises(MCPResponseFormatError, match="pagination"):
+        parse_meetings_listing(broken)
+
+
+def test_a_non_numeric_total_raises(mcp_current_listing_text):
+    """The total is the completeness check, so it must be a number."""
+    broken = mcp_current_listing_text.replace('total_count="3"', 'total_count="lots"')
+    with pytest.raises(MCPResponseFormatError, match="total_count"):
+        parse_meetings_listing(broken)
+
+
+def test_a_meeting_named_only_as_a_duplicate_is_returned(mcp_current_listing_text):
+    """Another capture of a listed event is a note of its own, so it comes back.
+
+    It has no element to parse, so it carries the group's tag and the date of
+    the event it shares with the listed meeting.
+    """
+    envelope, meetings = parse_meetings_listing(mcp_current_listing_text)
+
+    (duplicate,) = envelope.duplicates
+    assert duplicate.meeting_id == UUID_C
+    assert duplicate.duplicate_of == UUID_A
+    assert duplicate.date_text == meetings[0].date_text
+    assert duplicate.element_text == f'<meeting id="{UUID_A}" other_ids="{UUID_C}" />'
+    assert duplicate.title == ""
+
+
+def test_a_duplicate_that_is_listed_is_not_repeated(mcp_current_listing_text):
+    """An id the root already lists is not a second copy of anything."""
+    both = mcp_current_listing_text.replace(
+        f'other_ids="{UUID_C}"', f'other_ids="{UUID_B},{UUID_C}"'
+    )
+    envelope, _ = parse_meetings_listing(both)
+    assert [d.meeting_id for d in envelope.duplicates] == [UUID_C]
+
+
+def test_a_duplicate_group_naming_no_others_raises(mcp_current_listing_text):
+    """An empty group is drift, not a group of one."""
+    broken = mcp_current_listing_text.replace(f' other_ids="{UUID_C}"', "")
+    with pytest.raises(MCPResponseFormatError, match="other_ids"):
+        parse_meetings_listing(broken)
+
+
+def test_tags_quoted_in_a_summary_are_not_taken_for_real(mcp_detail_text):
+    """A summary is free Markdown, so it may quote either tag verbatim."""
+    quoting = mcp_detail_text.replace(
+        "### Decisions",
+        '### Decisions\n\n<pagination has_more="true" next_cursor="x" />\n'
+        f'<duplicate_recordings><meeting id="{UUID_A}" other_ids="{UUID_C}" />'
+        "</duplicate_recordings>",
+    )
+    envelope, meetings = parse_meetings_detail(quoting)
+
+    assert envelope.paginated is False
+    assert envelope.duplicates == []
+    assert "<pagination" in meetings[0].summary_markdown
+
+
+def test_date_wins_where_both_dates_appear(mcp_listing_text):
+    """Elements archived from the older server parse exactly as they did."""
+    both = mcp_listing_text.replace(
+        'date="Jan 27, 2026 9:30 AM CST"',
+        'date="Jan 27, 2026 9:30 AM CST" meeting_at="2026-01-27T09:30:00.000-06:00"',
+        1,
+    )
+    _, meetings = parse_meetings_listing(both)
+    assert meetings[0].date_text == "Jan 27, 2026 9:30 AM CST"
+
+
+def test_a_meeting_with_neither_date_raises(mcp_current_listing_text):
+    """Without ``date`` or ``meeting_at`` a meeting cannot be filed."""
+    broken = mcp_current_listing_text.replace(
+        ' meeting_at="2026-01-27T09:30:00-06:00"', "", 1
+    )
+    with pytest.raises(MCPResponseFormatError, match="missing id, title or date"):
+        parse_meetings_listing(broken)
+
+
+def test_current_detail_parses(mcp_current_detail_text):
+    """The detail shape gained elements; none of them get in the way."""
+    envelope, (meeting,) = parse_meetings_detail(mcp_current_detail_text)
+
+    assert envelope.count == 1
+    assert meeting.date_text == "2026-01-27T09:30:00-06:00"
+    assert meeting.summary_markdown == "### Decisions\n\n- Approved the budget."
+    assert meeting.participants == ["Oat Benson (note creator) <oat@granola.ai>"]
 
 
 # -- detail ----------------------------------------------------------------
@@ -237,11 +387,46 @@ def test_unknown_timezone_is_left_unresolved():
 
 
 @pytest.mark.parametrize(
-    "value", ["", "not a date", "2026-07-28T20:00:00Z", "Jul 99, 2026 8:00 PM CDT"]
+    "value",
+    [
+        "",
+        "not a date",
+        "2026-07-28",
+        "2026-13-40T99:99:00Z",
+        "Jul 99, 2026 8:00 PM CDT",
+    ],
 )
 def test_unparseable_dates_are_left_unresolved(value):
-    """Anything unrecognized yields no instant rather than an exception."""
+    """Anything unrecognized yields no instant rather than an exception.
+
+    A bare date names a day in some timezone, not an instant, so it is not
+    resolved either.
+    """
     assert parse_mcp_date(value).instant is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-07-28T20:00:00-05:00",
+        "2026-07-28T20:00:00.000-05:00",
+        "2026-07-29T01:00:00Z",
+        "2026-07-29T01:00:00+00:00",
+    ],
+)
+def test_meeting_at_resolves_to_utc(value):
+    """``meeting_at`` carries its own offset, so it always resolves."""
+    parsed = parse_mcp_date(value)
+    assert parsed.instant == datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
+    assert parsed.tz_resolved is True
+    assert parsed.text == value, "the original is kept verbatim"
+
+
+def test_meeting_at_without_an_offset_is_unresolved():
+    """A local time with no offset is read as UTC and says so."""
+    parsed = parse_mcp_date("2026-07-28T20:00:00")
+    assert parsed.instant == datetime(2026, 7, 28, 20, 0, tzinfo=UTC)
+    assert parsed.tz_resolved is False
 
 
 # -- hashing and projection ------------------------------------------------

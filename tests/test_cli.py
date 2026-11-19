@@ -420,6 +420,29 @@ def test_verify_counts_transcripts_only_the_archive_has(capsys, tmp_path, note_p
     assert "transcript-missing : 1 (retained locally)" in capsys.readouterr().out
 
 
+def test_verify_counts_transcripts_not_yet_known_whole(capsys, tmp_path, note_payload):
+    """Transcripts an older version may have cut short are counted until checked."""
+    from granola_exporter.models import Note
+    from granola_exporter.store import Archive
+
+    archive = Archive(tmp_path / "archive")
+    archive.write_note(Note.from_api(note_payload), "# x", None)
+    index = archive.load_index()
+    entry = index.pop(next(iter(index)))
+    fetched = {"transcript_fetched_at": "2026-01-01T00:00:00+00:00"}
+    first, second = "d290f1ee-6c54-4b01-90e6-d701748f0851", "e96c1c66-ed02-4a32-9acd-54720f8761b1"
+    index[f"mcp_{first}"] = {**entry, "uuid": first, "mcp": fetched}
+    index[f"mcp_{second}"] = {
+        **entry, "uuid": second, "mcp": {**fetched, "transcript_complete": False}
+    }
+    archive.save_index()
+
+    assert main(["verify"]) == 0
+    out = capsys.readouterr().out
+    assert "transcript-recheck : 1 (archived before paging" in out
+    assert "transcript-partial : 1 (kept;" in out
+
+
 # -- verify: MCP reconcile -------------------------------------------------
 
 

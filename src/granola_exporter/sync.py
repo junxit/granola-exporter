@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from .mcp_parse import (
     PARSER_VERSION,
+    MCPListingEnvelope,
     MCPMeeting,
     MCPTranscript,
     MCPResponseFormatError,
@@ -30,6 +31,7 @@ from .mcp_parse import (
     parse_meetings_listing,
     parse_transcript,
     split_transcript,
+    stable_content,
 )
 from .models import (
     MCP_KEY_PREFIX,
@@ -50,15 +52,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .mcp_api import MCPProtocol
 
 
-# Windows are scanned at a month at a time. `list_meetings` exposes no cursor,
-# so a window that comes back at or above SUSPICIOUS_RESULT_COUNT might have
-# been truncated by an undocumented cap; it is bisected and rescanned rather
-# than trusted. A single day still at the threshold is *reported*, so the
-# archive can say "I may be incomplete here" instead of quietly being so.
+# Windows are scanned at a month at a time. A paged listing is followed by its
+# cursor to the last page and checked against the total the server reports. A
+# listing that is not paged gives no such proof, so a window that comes back at
+# or above SUSPICIOUS_RESULT_COUNT might have been truncated by an undocumented
+# cap; it is bisected and rescanned rather than trusted. A single day still at
+# the threshold is *reported*, so the archive can say "I may be incomplete
+# here" instead of quietly being so.
 LISTING_WINDOW_DAYS = 31
 FOLDER_WINDOW_DAYS = 180
 SUSPICIOUS_RESULT_COUNT = 50
 MIN_WINDOW_DAYS = 1
+
+# A cursor that never runs out is a server bug, not a big window.
+MAX_LISTING_PAGES = 100
 
 # The MCP exposes no update time, so edits to older meetings are found by
 # re-reading a fixed number of archived notes each run: those still missing a
@@ -86,8 +93,14 @@ EMPTY_WINDOWS_BEFORE_STOP = 6
 # notes in a row have been throttled, the quota is spent and the rest of the
 # pass would only sleep through the same wall, so the run stops asking. This is
 # safe precisely because it is resumable: a note archived without a transcript
-# is retried by later syncs, and an archived transcript is never refetched.
+# is retried by later syncs, and an archived transcript is never refetched once
+# it is known to be whole.
 TRANSCRIPT_GIVEUP_STREAK = 3
+
+# A transcript page holds 40,000 bytes unless asked otherwise, and older
+# versions never asked. One they archived that runs longer came back whole,
+# so the server was not paging transcripts when it was fetched.
+TRANSCRIPT_PAGE_BYTES = 40_000
 
 
 @dataclass(slots=True)
@@ -116,6 +129,8 @@ class SyncCounts:
     undated: int = 0
     transcripts_failed: int = 0
     transcripts_deferred: int = 0
+    transcripts_completed: int = 0
+    transcripts_kept: int = 0
     truncated_windows: int = 0
     refresh_failed: int = 0
 
@@ -177,6 +192,12 @@ class SyncCounts:
             notes.append(
                 f"{self.refresh_failed} older note(s) could not be re-read — "
                 "they come round again on a later sync"
+            )
+        if self.transcripts_kept:
+            notes.append(
+                f"{self.transcripts_kept} archived transcript(s) do not match what "
+                "Granola serves now and were kept as archived; they may be cut "
+                "short (transcript_complete: false in index.json)"
             )
         return notes
 
@@ -463,7 +484,11 @@ def _scan_window(
     folder_id: str | None = None,
     verbose: bool = False,
 ) -> list[MCPMeeting]:
-    """List one window, bisecting when the result set looks truncated.
+    """List one window, to its last page or by bisecting a suspect one.
+
+    A paged listing is followed by its cursor and checked against the total
+    the server reports. One that is not paged proves nothing, so it is
+    bisected when the result set looks truncated.
 
     Args:
         client: The MCP backend.
@@ -474,16 +499,24 @@ def _scan_window(
         verbose: Whether to narrate the bisection.
 
     Returns:
-        The meetings found, deduplicated by id.
+        The meetings found, deduplicated by id, with any the listing named
+        only as another capture of a listed meeting's calendar event.
     """
-    counts.list_calls += 1
-    text = client.list_meetings(
-        custom_start=start, custom_end=end, folder_id=folder_id
-    )
-    _, meetings = parse_meetings_listing(text)
+    meetings, duplicates, envelope = _list_pages(client, start, end, counts, folder_id)
+
+    if envelope.paginated:
+        if envelope.total_count is not None and len(meetings) < envelope.total_count:
+            counts.truncated_windows += 1
+            print(
+                f"  WARN  {start}..{end} listed {len(meetings)} of the "
+                f"{envelope.total_count} meetings the server counts — this "
+                "window may be incomplete",
+                file=sys.stderr,
+            )
+        return meetings + duplicates
 
     if len(meetings) < SUSPICIOUS_RESULT_COUNT:
-        return meetings
+        return meetings + duplicates
 
     span = (end - start).days + 1
     if span <= MIN_WINDOW_DAYS:
@@ -495,7 +528,7 @@ def _scan_window(
             "subdivision limit — this day may be incomplete",
             file=sys.stderr,
         )
-        return meetings
+        return meetings + duplicates
 
     if verbose:
         print(f"  bisect    {start}..{end} ({len(meetings)} results)")
@@ -512,6 +545,61 @@ def _scan_window(
     for meeting in [*left, *right]:
         merged[meeting.meeting_id] = meeting
     return list(merged.values())
+
+
+def _list_pages(
+    client: MCPProtocol,
+    start: date,
+    end: date,
+    counts: SyncCounts,
+    folder_id: str | None,
+) -> tuple[list[MCPMeeting], list[MCPMeeting], MCPListingEnvelope]:
+    """List one window, following a paged listing's cursor to the last page.
+
+    Args:
+        client: The MCP backend.
+        start: Inclusive window start.
+        end: Inclusive window end.
+        counts: Tally to update.
+        folder_id: Restrict to one folder.
+
+    Returns:
+        The meetings listed, those named only as other captures of a listed
+        one, and the last page's envelope.
+
+    Raises:
+        MCPResponseFormatError: If the cursor repeats or never runs out --
+            pages that cannot be followed must not pass for a short window.
+    """
+    listed: dict[str, MCPMeeting] = {}
+    hidden: dict[str, MCPMeeting] = {}
+    cursor: str | None = None
+    followed: set[str] = set()
+    for _ in range(MAX_LISTING_PAGES):
+        counts.list_calls += 1
+        text = client.list_meetings(
+            custom_start=start, custom_end=end, folder_id=folder_id, cursor=cursor
+        )
+        envelope, meetings = parse_meetings_listing(text)
+        for meeting in meetings:
+            listed[meeting.meeting_id] = meeting
+        for meeting in envelope.duplicates:
+            hidden.setdefault(meeting.meeting_id, meeting)
+        if not envelope.has_more:
+            break
+        if envelope.next_cursor in followed:
+            raise MCPResponseFormatError(
+                "list_meetings returned a cursor it had already given", tool="list_meetings"
+            )
+        followed.add(envelope.next_cursor)
+        cursor = envelope.next_cursor
+    else:
+        raise MCPResponseFormatError(
+            f"list_meetings still had more after {MAX_LISTING_PAGES} pages",
+            tool="list_meetings",
+        )
+    duplicates = [m for uuid, m in hidden.items() if uuid not in listed]
+    return list(listed.values()), duplicates, envelope
 
 
 def _folder_membership(
@@ -608,8 +696,8 @@ def sync_mcp(
 ) -> SyncCounts:
     """Fetch meetings from the Granola MCP into the archive.
 
-    The MCP exposes neither an updated-since filter nor a cursor, so change
-    detection is rebuilt from what the listing tool does return:
+    The MCP has no watermark like the public API's, so change detection is
+    rebuilt from what the listing tool does return:
 
     1. Date windows stand in for the public API's watermark.
     2. ``listing_hash`` over the verbatim ``<meeting>`` element stands in for
@@ -617,8 +705,9 @@ def sync_mcp(
     3. The existing content hash still gates the disk write.
 
     Older notes are revisited by a rolling refresh: each run also re-reads
-    up to ``refresh_batch`` archived notes, missing transcripts first, by
-    re-listing the weeks they fall in. A summary regenerated long after its
+    up to ``refresh_batch`` archived notes -- missing transcripts first, then
+    transcripts archived before they were paged -- by re-listing the weeks
+    they fall in. A summary regenerated long after its
     meeting is therefore caught when the rotation reaches it rather than
     immediately. That is a real regression against the public API, and it is
     documented rather than hidden.
@@ -645,6 +734,12 @@ def sync_mcp(
     state = archive.source_state(SOURCE_MCP)
     index = archive.load_index()
     uuid_map = archive.uuid_index()
+
+    if settled := _settle_unpaged_transcripts(archive, index):
+        print(
+            f"  {settled} transcript(s) were archived before Granola paged "
+            "transcripts, so they are whole."
+        )
 
     full = opts.full or not state.get("scanned_through")
     trailing_start = today - timedelta(days=opts.window_days)
@@ -793,6 +888,17 @@ def sync_mcp(
                 "— flagged, not deleted."
             )
 
+    if counts.transcripts_completed:
+        print(
+            f"  {counts.transcripts_completed} transcript(s) archived cut short "
+            "are now complete."
+        )
+    if waiting := len(transcripts_to_recheck(archive.load_index())):
+        print(
+            f"  {waiting} transcript(s) archived before transcripts were paged "
+            "are still to be checked — later syncs continue, or run sync --full"
+        )
+
     retry_floor = _retry_floor(failed, earliest)
     archive.save_index()
     archive.save_source_state(
@@ -875,6 +981,7 @@ def _triage(
     """
     pending: list[MCPMeeting] = []
     settled: set[str] = set()
+    recheck = set(transcripts_to_recheck(index))
     for meeting in meetings:
         key = mcp_archive_key(meeting.meeting_id)
         if key is None:
@@ -901,6 +1008,9 @@ def _triage(
             # Folders are not in the listing element, so a note filed or
             # unfiled since it was archived looks unchanged without this.
             and not _folders_moved(meeting.meeting_id, block, folders, known)
+            # A transcript an older version may have cut short is read again,
+            # wherever it is listed, so that it can be checked.
+            and key not in recheck
         ):
             settled.add(meeting.meeting_id)
             continue
@@ -974,8 +1084,9 @@ def _old_note_candidates(
     Nothing in the protocol announces an edit, and a plain sync lists only
     the trailing window, so a fixed number of archived notes are re-read each
     run, drawn from the whole archive. Notes still missing a transcript come
-    first -- a throttled backfill leaves many -- then the least recently
-    checked, so edits to old meetings are found in rotation.
+    first -- a throttled backfill leaves many -- then those whose transcript
+    was archived before transcripts were paged and may be cut short, then the
+    least recently checked, so edits to old meetings are found in rotation.
 
     Args:
         index: The loaded index.
@@ -987,6 +1098,7 @@ def _old_note_candidates(
     """
     if limit <= 0:
         return []
+    recheck = set(transcripts_to_recheck(index))
     ranked: list[tuple[int, datetime, str]] = []
     for key, entry in index.items():
         if not key.startswith(MCP_KEY_PREFIX) or entry.get("upstream_missing"):
@@ -1007,9 +1119,81 @@ def _old_note_candidates(
             block.get("refresh_attempted_at"),
             block.get("transcript_attempted_at" if missing else "detail_fetched_at"),
         )
-        ranked.append((0 if missing else 1, checked, key))
+        rank = 0 if missing else 1 if key in recheck else 2
+        ranked.append((rank, checked, key))
     ranked.sort()
     return [key for _, _, key in ranked[:limit]]
+
+
+def transcripts_to_recheck(index: dict[str, dict[str, Any]]) -> list[str]:
+    """The archived MCP transcripts that may have been cut short.
+
+    Older versions read only the first page of a paged transcript, and could
+    not tell when there were more. A transcript is marked
+    ``transcript_complete`` once it is known whole; one archived before that
+    is re-fetched once to find out.
+
+    Args:
+        index: The loaded index.
+
+    Returns:
+        Archive keys of MCP notes holding a transcript not yet checked.
+    """
+    waiting = []
+    for key, entry in index.items():
+        block = entry.get("mcp") if isinstance(entry, dict) else None
+        if (
+            key.startswith(MCP_KEY_PREFIX)
+            and isinstance(block, dict)
+            and block.get("transcript_fetched_at")
+            and block.get("transcript_complete") is None
+            and entry.get("has_transcript")
+            and not entry.get("upstream_missing")
+        ):
+            waiting.append(key)
+    return waiting
+
+
+def _settle_unpaged_transcripts(
+    archive: Archive, index: dict[str, dict[str, Any]]
+) -> int:
+    """Mark whole the transcripts archived before Granola paged them.
+
+    Any transcript an older version archived may be the first page of a longer
+    one -- unless the archive shows the server was not paging when it was
+    fetched. One that runs longer than a page proves exactly that for the
+    moment it was fetched, and so for everything fetched before it: paging,
+    once it arrived, stayed. Those transcripts are marked whole with no
+    request at all, and are never compared with a transcript Granola has since
+    rendered differently.
+
+    Args:
+        archive: The archive holding the notes.
+        index: The loaded index, updated in place.
+
+    Returns:
+        How many transcripts were marked whole.
+    """
+    fetched: dict[str, datetime] = {}
+    whole_until: datetime | None = None
+    for key in transcripts_to_recheck(index):
+        when = parse_timestamp(index[key]["mcp"].get("transcript_fetched_at"))
+        if when is None:
+            continue
+        fetched[key] = when
+        transcript = _archived_transcript(archive, index[key])
+        if (
+            transcript is not None
+            and len(transcript.text.encode("utf-8")) > TRANSCRIPT_PAGE_BYTES
+            and (whole_until is None or when > whole_until)
+        ):
+            whole_until = when
+    if whole_until is None:
+        return 0
+    settled = [key for key, when in fetched.items() if when <= whole_until]
+    for key in settled:
+        _mcp_block(index[key])["transcript_complete"] = True
+    return len(settled)
 
 
 def _relist_windows(days: list[date], width: int) -> list[tuple[date, date]]:
@@ -1126,36 +1310,45 @@ def _write_mcp_meetings(
             attempted_at = previous.get("transcript_attempted_at")
             failures = previous.get("transcript_failures")
             failures = failures if isinstance(failures, int) else 0
+            # True once the transcript is known whole, False once a re-check
+            # kept the archived one against a different upstream, None before.
+            complete = previous.get("transcript_complete")
 
             # A transcript already fetched -- even an empty one -- is
             # immutable in practice, and re-fetching risks replacing good
             # content with a degraded re-render while spending the scarcest
             # budget there is. It is reloaded from raw.json rather than skipped
             # outright: dropping it would change the content hash on every
-            # run, so the note would look updated forever.
+            # run, so the note would look updated forever. The one exception is
+            # a transcript archived before transcripts were paged, which may
+            # hold only the first page: that is checked once.
             transcript = (
                 _archived_transcript(archive, entry) if transcript_at else None
             )
-            if transcript is None and latch.giving_up:
+            if transcript is not None:
+                if complete is None and not transcript.text.strip():
+                    complete = True  # nothing there to have been cut short
+                elif complete is None and not latch.giving_up:
+                    attempted_at = _now_iso()
+                    transcript, complete, replaced = _recheck_transcript(
+                        client, key, detail.meeting_id, transcript, counts, latch
+                    )
+                    if replaced:
+                        transcript_at = attempted_at
+            elif latch.giving_up:
                 # The quota is spent. Archive the note now rather than sleeping
                 # through a retry ladder that cannot succeed; a later run
                 # picks these notes up again.
                 counts.transcripts_deferred += 1
-            elif transcript is None:
+            else:
                 attempted_at = _now_iso()
                 try:
-                    payload = client.get_meeting_transcript(detail.meeting_id)
-                    transcript = parse_transcript(payload)
-                    if transcript.meeting_id != detail.meeting_id:
-                        # Never file one meeting's words under another's.
-                        raise ValueError(
-                            f"asked for {detail.meeting_id}, got a transcript "
-                            f"for {transcript.meeting_id}"
-                        )
+                    transcript = _fetch_transcript(client, detail.meeting_id)
                     counts.transcript_fetches += 1
                     transcript_at = attempted_at
                     failures = 0
                     latch.throttled = 0
+                    complete = True
                 except MCPResponseFormatError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -1169,22 +1362,10 @@ def _write_mcp_meetings(
                         f"  WARN  no transcript for {key} — {exc}",
                         file=sys.stderr,
                     )
-                    # Only throttling says anything about the *next* note; one
-                    # unparseable or missing transcript says nothing at all.
-                    # Throttling is also the one failure that says nothing
-                    # about *this* note, so it never counts against it.
-                    throttling = _is_throttling(exc)
-                    if not throttling:
+                    # Throttling is the one failure that says nothing about
+                    # *this* note, so it never counts against it.
+                    if not _note_throttling(latch, exc):
                         failures += 1
-                    latch.throttled = latch.throttled + 1 if throttling else 0
-                    if latch.throttled >= TRANSCRIPT_GIVEUP_STREAK:
-                        latch.giving_up = True
-                        print(
-                            f"  STOP  {latch.throttled} transcripts throttled in a row "
-                            "— skipping the rest this pass; re-run sync to "
-                            "retry them",
-                            file=sys.stderr,
-                        )
 
             # Authoritative membership is taken as-is, empty included: falling
             # back to the stored folders whenever none were listed meant a
@@ -1221,11 +1402,14 @@ def _write_mcp_meetings(
                 "date_text": detail.date_text,
                 "tz_resolved": parse_mcp_date(detail.date_text).tz_resolved,
                 "folders": sorted(names),
+                **({} if complete is None else {"transcript_complete": complete}),
             }
 
             # Hash only the verbatim tool output. Hashing the wrapper would let
-            # a parser-version bump rewrite every directory in the archive.
-            digest = content_hash(raw["mcp"])
+            # a parser-version bump rewrite every directory in the archive, and
+            # hashing the server's ever-changing agent context would rewrite a
+            # note every time it is read.
+            digest = content_hash(stable_content(raw["mcp"]))
             if archive.is_unchanged(key, digest):
                 # Record the check anyway: without it the rolling refresh kept
                 # picking the same unchanged notes on every run.
@@ -1248,6 +1432,128 @@ def _write_mcp_meetings(
                 print(f"  {result.status:9} {note.display_title}")
 
     return failed
+
+
+class TranscriptNotReady(RuntimeError):
+    """Raised when the server says a transcript exists but is not ready yet."""
+
+
+# Reasons the server gives for serving no transcript *yet*. Any other reason --
+# `no_transcript`, `transcript_deleted` -- is final, and an empty transcript is
+# archived as before.
+_TRANSCRIPT_DUE = frozenset({"transcript_pending", "not_happened_yet"})
+
+
+def _fetch_transcript(client: MCPProtocol, meeting_id: str) -> MCPTranscript:
+    """Fetch and parse one meeting's transcript.
+
+    Args:
+        client: The MCP backend.
+        meeting_id: The meeting.
+
+    Returns:
+        The transcript.
+
+    Raises:
+        TranscriptNotReady: If the server serves none yet, as for a meeting
+            that has only just ended. Archiving that as empty would be final:
+            an empty transcript is never fetched again.
+        ValueError: If it came back for another meeting. One meeting's words
+            are never filed under another's.
+    """
+    payload = client.get_meeting_transcript(meeting_id)
+    unavailable = payload.get("transcript_unavailable") if isinstance(payload, dict) else None
+    reason = unavailable.get("reason") if isinstance(unavailable, dict) else unavailable
+    if reason in _TRANSCRIPT_DUE and not str(payload.get("transcript") or "").strip():
+        raise TranscriptNotReady(f"transcript not ready yet ({reason}); a later sync fetches it")
+    transcript = parse_transcript(payload)
+    if transcript.meeting_id != meeting_id:
+        raise ValueError(
+            f"asked for {meeting_id}, got a transcript for {transcript.meeting_id}"
+        )
+    return transcript
+
+
+def _note_throttling(latch: _TranscriptLatch, exc: BaseException) -> bool:
+    """Feed a failed transcript fetch to the run's throttling latch.
+
+    Only throttling says anything about the *next* note; one unparseable or
+    missing transcript says nothing at all.
+
+    Args:
+        latch: Throttling state shared across the run.
+        exc: Why the fetch failed.
+
+    Returns:
+        Whether the failure was throttling.
+    """
+    throttling = _is_throttling(exc)
+    latch.throttled = latch.throttled + 1 if throttling else 0
+    if latch.throttled >= TRANSCRIPT_GIVEUP_STREAK:
+        latch.giving_up = True
+        print(
+            f"  STOP  {latch.throttled} transcripts throttled in a row "
+            "— skipping the rest this pass; re-run sync to retry them",
+            file=sys.stderr,
+        )
+    return throttling
+
+
+def _recheck_transcript(
+    client: MCPProtocol,
+    key: str,
+    meeting_id: str,
+    archived: MCPTranscript,
+    counts: SyncCounts,
+    latch: _TranscriptLatch,
+) -> tuple[MCPTranscript, bool | None, bool]:
+    """Re-fetch a transcript archived before transcripts were paged.
+
+    Older versions read only the first page, so a long transcript may be
+    archived cut short. It is replaced only by one that continues it word for
+    word: archived words are never traded for different ones, so a transcript
+    Granola now serves otherwise -- or not at all -- leaves it as it is.
+
+    Args:
+        client: The MCP backend.
+        key: The note's archive key, for messages.
+        meeting_id: The meeting.
+        archived: The transcript in the archive.
+        counts: Tally to update.
+        latch: Throttling state shared across the run.
+
+    Returns:
+        The transcript to archive; ``True`` once it is known whole, ``False``
+        when the archived one was kept against a different upstream, ``None``
+        when the check could not be made and is due again; and whether the
+        archived transcript was replaced.
+    """
+    try:
+        fresh = _fetch_transcript(client, meeting_id)
+    except MCPResponseFormatError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the archived transcript stands
+        print(
+            f"  WARN  could not re-check the transcript of {key} — {exc}",
+            file=sys.stderr,
+        )
+        _note_throttling(latch, exc)
+        return archived, None, False
+
+    counts.transcript_fetches += 1
+    latch.throttled = 0
+    if fresh.text == archived.text:
+        return archived, True, False
+    if fresh.text.startswith(archived.text):
+        counts.transcripts_completed += 1
+        return fresh, True, True
+    counts.transcripts_kept += 1
+    upstream = "a different transcript" if fresh.text.strip() else "no transcript"
+    print(
+        f"  WARN  {key}: Granola now serves {upstream} — keeping the archived one",
+        file=sys.stderr,
+    )
+    return archived, False, False
 
 
 def _stored_date(value: Any) -> date | None:

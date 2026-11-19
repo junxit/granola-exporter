@@ -7,6 +7,7 @@ production.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import mcp.types as t
@@ -24,6 +25,7 @@ from granola_exporter.mcp_api import (
 from granola_exporter.mcp_auth import MCPAuthError
 
 UUID_A = "d290f1ee-6c54-4b01-90e6-d701748f0851"
+UUID_B = "e96c1c66-ed02-4a32-9acd-54720f8761b1"
 
 
 def _text_result(text: str, *, is_error: bool = False) -> t.CallToolResult:
@@ -202,14 +204,16 @@ def test_list_meetings_requires_dates_for_a_custom_range():
 
 
 def test_list_meetings_sends_iso_dates():
-    """Dates are sent in the documented ISO form."""
+    """Dates are sent in the documented ISO form, under the documented names."""
     client = _Recorder()
     client.list_meetings(custom_start=date(2026, 1, 1), custom_end=date(2026, 1, 31))
     tool, args = client.calls[0]
     assert tool == "list_meetings"
-    assert args["custom_start"] == "2026-01-01"
-    assert args["custom_end"] == "2026-01-31"
+    assert args["from_date"] == "2026-01-01"
+    assert args["to_date"] == "2026-01-31"
     assert args["time_range"] == "custom"
+    assert "custom_start" not in args and "custom_end" not in args
+    assert "cursor" not in args, "a first page sends no cursor"
 
 
 def test_list_meetings_passes_a_folder_filter():
@@ -218,7 +222,136 @@ def test_list_meetings_passes_a_folder_filter():
     client.list_meetings(time_range="last_30_days", folder_id="fid")
     _, args = client.calls[0]
     assert args["folder_id"] == "fid"
-    assert "custom_start" not in args
+    assert "from_date" not in args
+
+
+def test_list_meetings_passes_a_cursor():
+    """A later page is asked for with the previous page's cursor."""
+    client = _Recorder()
+    client.list_meetings(
+        custom_start=date(2026, 1, 1), custom_end=date(2026, 1, 31), cursor="next-page"
+    )
+    _, args = client.calls[0]
+    assert args["cursor"] == "next-page"
+    assert args["from_date"] == "2026-01-01", "the filters stay the same"
+
+
+# -- transcript pages ------------------------------------------------------
+
+
+class _Pages(MCPClient):
+    """A client whose transport hands back one queued page per call."""
+
+    def __init__(self, *pages: dict) -> None:
+        """Initialize without connecting.
+
+        Args:
+            *pages: The decoded payloads, in the order they are returned.
+        """
+        self.calls: list[tuple[str, dict]] = []
+        self._pages = list(pages)
+
+    def _call(self, tool, arguments=None):  # type: ignore[override]
+        """Record the call and return the next page.
+
+        Args:
+            tool: Tool name.
+            arguments: Tool arguments.
+
+        Returns:
+            The next queued page, as a text result.
+        """
+        self.calls.append((tool, dict(arguments or {})))
+        return _text_result(json.dumps(self._pages.pop(0)))
+
+
+def _page(text: str, *, offset: int = 0, more: int | None = None, **extra) -> dict:
+    """Build one ``get_meeting_transcript`` page.
+
+    Args:
+        text: The page's transcript text.
+        offset: Where the page starts.
+        more: The ``next_offset`` when the transcript continues.
+        **extra: Further fields to include.
+
+    Returns:
+        The decoded payload.
+    """
+    page = {"id": UUID_A, "title": "Budget", "offset": offset, "transcript": text, **extra}
+    page["truncated"] = more is not None
+    if more is not None:
+        page["next_offset"] = more
+        page["truncation_notice"] = "Continue with offset set to next_offset."
+    return page
+
+
+def test_a_paged_transcript_is_followed_to_the_end():
+    """Regression: only the first page was read, so long transcripts were cut.
+
+    The server returns a transcript in pages and says so with ``truncated``;
+    reading one page archived the start of a long meeting as if it were all.
+    """
+    client = _Pages(
+        _page(" Me: one.", more=9, total_chars=33),
+        _page("  Them: two.", offset=9, more=21),
+        _page("  Me: three.", offset=21),
+    )
+
+    payload = client.get_meeting_transcript(UUID_A)
+
+    assert payload["transcript"] == " Me: one.  Them: two.  Me: three."
+    assert payload["id"] == UUID_A and payload["title"] == "Budget"
+    assert payload["total_chars"] == 33, "the first page's fields are kept"
+    for paging in ("truncated", "next_offset", "offset", "truncation_notice"):
+        assert paging not in payload
+    sent = [args for _, args in client.calls]
+    assert [a.get("offset") for a in sent] == [None, 9, 21]
+    assert all(a["meeting_id"] == UUID_A for a in sent)
+    assert len({a["max_chars"] for a in sent}) == 1, "every page asks for the same size"
+
+
+def test_a_whole_transcript_takes_one_call():
+    """A transcript that fits one page is returned as it came."""
+    client = _Pages(_page(" Me: all of it."))
+    assert client.get_meeting_transcript(UUID_A)["transcript"] == " Me: all of it."
+    assert len(client.calls) == 1
+    assert client.calls[0][1]["max_chars"] >= 40_000, "pages are asked for large"
+
+
+def test_a_transcript_without_paging_fields_passes_through():
+    """A server that does not page is read exactly as before."""
+    client = _Pages({"id": UUID_A, "title": "Budget", "transcript": " Me: hi."})
+    assert client.get_meeting_transcript(UUID_A) == {
+        "id": UUID_A,
+        "title": "Budget",
+        "transcript": " Me: hi.",
+    }
+
+
+@pytest.mark.parametrize("following", [None, 0, -5, True])
+def test_a_page_that_does_not_move_forward_is_an_error(following):
+    """More text with no way forward must not end as a short transcript."""
+    first = _page(" Me: one.", more=9)
+    first["next_offset"] = following
+    with pytest.raises(MCPToolError, match="next_offset"):
+        _Pages(first).get_meeting_transcript(UUID_A)
+
+
+def test_a_page_for_another_meeting_is_an_error():
+    """One meeting's words are never stitched onto another's."""
+    other = {**_page(" Them: someone else.", offset=9), "id": UUID_B}
+    client = _Pages(_page(" Me: one.", more=9), other)
+    with pytest.raises(MCPToolError, match="is not for"):
+        client.get_meeting_transcript(UUID_A)
+
+
+def test_pages_that_never_end_are_an_error(monkeypatch):
+    """A cursor that never runs out stops rather than spinning."""
+    monkeypatch.setattr("granola_exporter.mcp_api.MAX_TRANSCRIPT_PAGES", 3)
+    client = _Pages(*(_page("x", offset=n, more=n + 1) for n in range(10)))
+    with pytest.raises(MCPToolError, match="still truncated after 3 pages"):
+        client.get_meeting_transcript(UUID_A)
+    assert len(client.calls) == 4, "the first page and three more"
 
 
 def test_list_folders_tolerates_either_response_shape():

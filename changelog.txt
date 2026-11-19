@@ -1,6 +1,55 @@
 Changelog
 =========
 
+0.6.5
+-----
+- MCP sync works again. Granola's MCP server stopped sending each meeting's
+  localized date attribute and now sends only an ISO 8601 meeting_at, so
+  every MCP sync stopped at its first listing with "meeting element missing
+  id, title or date". The parser reads meeting_at when date is absent and
+  resolves it to UTC from its own offset; elements archived earlier carry
+  both and parse exactly as before. The parser version moves to 2.
+- Long MCP transcripts are archived whole. get_meeting_transcript now returns
+  a transcript in pages of about 40,000 bytes and flags the rest with
+  truncated and next_offset. Only the first page was read, so a long meeting
+  was archived cut short with nothing to say so -- and an archived
+  transcript is never refetched, so it stayed that way. Every page is now
+  followed, each asked for as large as the server allows. A transcript an
+  earlier version archived that runs longer than a page shows the server
+  was not paging yet, so it and every transcript fetched before it are
+  marked whole without a request -- Granola has also changed how it renders
+  transcripts, so comparing those would only find them different. Each of
+  the rest is re-checked once: one the server's text continues word for word
+  is completed, and one it serves differently, or not at all, is kept as
+  archived and marked transcript_complete false in index.json. verify counts
+  both (transcript-recheck, transcript-partial).
+  A plain sync re-checks the trailing window and up to --refresh-batch older
+  notes per run, after any still missing a transcript; sync --full re-checks
+  every note it lists.
+- A transcript that is not ready yet is no longer archived as empty. The
+  server now says why it serves none: transcript_pending and
+  not_happened_yet mean later, and a meeting synced as it ended was archived
+  with an empty transcript that was never asked for again. Those are now
+  retried by later syncs; only no_transcript and transcript_deleted are
+  archived as empty.
+- MCP listings are paged now too. Each window is followed by its cursor to
+  the last page and checked against the total the server reports, and a
+  window that comes up short is reported as possibly incomplete. Bisection
+  remains for a listing that is not paged.
+- Other captures of a calendar event are archived. When several people
+  record the same meeting, the listing shows one note and names the rest
+  only in duplicate_recordings. Each is a note of its own, and is now
+  archived and filed in its folders; a full scan no longer flags one already
+  in the archive as gone from upstream.
+- A note read again without changes is no longer rewritten. get_meetings
+  now carries context_for_agents, background the server rewrites on every
+  call; counted in the content hash, it made every note look updated, so each
+  sync rewrote every note in its trailing window. It is still archived, as
+  of the note's last real change.
+- A flag a meeting leaves to the listing's flag_defaults takes that default
+  instead of reading as unknown, and listing dates are sent under the names
+  the server documents, from_date and to_date.
+
 0.6.4
 -----
 - A transcript Granola deletes is no longer lost from the archive.

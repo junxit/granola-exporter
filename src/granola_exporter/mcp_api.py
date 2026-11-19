@@ -47,6 +47,14 @@ MCP_URL = "https://mcp.granola.ai/mcp"
 # `get_meetings` accepts at most ten ids per call.
 MAX_MEETINGS_PER_CALL = 10
 
+# `get_meeting_transcript` returns a transcript in pages, 40,000 bytes each by
+# default, flagging `truncated` and the `next_offset` to continue from. Pages
+# are asked for as large as the server will send -- it caps the request -- so
+# most transcripts still take one call of the scarcest budget there is, and
+# the rest are followed to the end.
+TRANSCRIPT_PAGE_CHARS = 1_000_000
+MAX_TRANSCRIPT_PAGES = 100
+
 # Documented as averaging ~100 requests/minute across all tools, but the server
 # rejects sustained traffic well below that during a backfill, so the client
 # paces itself more conservatively and backs off when told to.
@@ -169,6 +177,7 @@ class MCPProtocol(Protocol):
         custom_end: date | None = None,
         time_range: str = "custom",
         folder_id: str | None = None,
+        cursor: str | None = None,
     ) -> str:
         """Return the verbatim ``list_meetings`` response."""
         ...
@@ -708,6 +717,7 @@ class MCPClient:
         custom_end: date | None = None,
         time_range: str = "custom",
         folder_id: str | None = None,
+        cursor: str | None = None,
     ) -> str:
         """List meetings in a window, returning the response verbatim.
 
@@ -716,6 +726,8 @@ class MCPClient:
             custom_end: Inclusive end of a custom range.
             time_range: The server's range enum; ``custom`` uses the dates.
             folder_id: Restrict to one folder.
+            cursor: The ``next_cursor`` of the previous page, to continue a
+                listing; the other arguments must be the same.
 
         Returns:
             The verbatim tool output, for the parser and for ``raw.json``.
@@ -724,10 +736,14 @@ class MCPClient:
         if time_range == "custom":
             if custom_start is None or custom_end is None:
                 raise MCPError("a custom time_range needs both start and end dates")
-            args["custom_start"] = custom_start.isoformat()
-            args["custom_end"] = custom_end.isoformat()
+            # The names the server documents. It still honors the older
+            # custom_start/custom_end, but no longer lists them.
+            args["from_date"] = custom_start.isoformat()
+            args["to_date"] = custom_end.isoformat()
         if folder_id:
             args["folder_id"] = folder_id
+        if cursor:
+            args["cursor"] = cursor
         return _result_text(self._call("list_meetings", args), tool="list_meetings")
 
     def get_meetings(self, meeting_ids: Sequence[str]) -> str:
@@ -760,23 +776,57 @@ class MCPClient:
         )
 
     def get_meeting_transcript(self, meeting_id: str) -> dict[str, Any]:
-        """Fetch one meeting's transcript.
+        """Fetch one meeting's whole transcript, following every page.
+
+        Reading only the first page archives a long transcript cut short with
+        nothing to show for it, so a page that reports ``truncated`` is
+        followed from its ``next_offset`` until one does not.
 
         Args:
             meeting_id: A meeting UUID.
 
         Returns:
-            The decoded payload.
+            The decoded payload of the first page, its ``transcript`` holding
+            the text of every page and the paging fields dropped.
 
         Raises:
             MCPError: If the id is not a UUID.
+            MCPToolError: If a page does not move the offset forward or comes
+                back for another meeting, or the pages never end.
         """
+        tool = "get_meeting_transcript"
         if not is_valid_uuid(meeting_id):
             raise MCPError(f"refusing a malformed meeting id: {meeting_id!r}")
-        return _result_json(
-            self._call("get_meeting_transcript", {"meeting_id": meeting_id}),
-            tool="get_meeting_transcript",
-        )
+        arguments = {"meeting_id": meeting_id, "max_chars": TRANSCRIPT_PAGE_CHARS}
+        first = _result_json(self._call(tool, arguments), tool=tool)
+        if not isinstance(first, dict) or not first.get("truncated"):
+            return first
+
+        pieces = [str(first.get("transcript") or "")]
+        page, offset = first, 0
+        for _ in range(MAX_TRANSCRIPT_PAGES):
+            following = page.get("next_offset")
+            if not isinstance(following, int) or isinstance(following, bool) or following <= offset:
+                raise MCPToolError(
+                    f"{tool} reported more text without a next_offset past {offset}"
+                )
+            offset = following
+            page = _result_json(self._call(tool, {**arguments, "offset": offset}), tool=tool)
+            if not isinstance(page, dict) or (
+                str(page.get("id") or "").strip().lower()
+                != str(first.get("id") or "").strip().lower()
+            ):
+                raise MCPToolError(f"{tool} page at offset {offset} is not for {meeting_id}")
+            pieces.append(str(page.get("transcript") or ""))
+            if not page.get("truncated"):
+                break
+        else:
+            raise MCPToolError(f"{tool} was still truncated after {MAX_TRANSCRIPT_PAGES} pages")
+
+        paging = {"truncated", "next_offset", "offset", "truncation_notice"}
+        whole = {key: value for key, value in first.items() if key not in paging}
+        whole["transcript"] = "".join(pieces)
+        return whole
 
 
 def login(
