@@ -463,14 +463,17 @@ API key, use it — this backend exists for accounts that cannot get one.
   transcript a page at a time. Every page is fetched, each asked for as large
   as the server allows, so most transcripts still take a single call.
   Versions up to 0.6.4 read only the first page, so a long transcript they
-  archived may be cut short. Each is **re-checked once**: when what Granola
-  serves continues the archived text word for word, the archived copy is
-  completed; when Granola serves something else, or nothing, the archived copy
-  is kept as it is and marked `transcript_complete: false`. `verify` counts
-  the transcripts still due a check (`transcript-recheck`) and those kept
-  (`transcript-partial`). A plain `sync` re-checks the trailing window and up
-  to `--refresh-batch` older notes per run; `sync --full` re-checks every one
-  it lists.
+  archived may be cut short — unless the archive shows Granola was not paging
+  yet. A transcript they archived that runs longer than a page (40,000 bytes)
+  came back whole, so it and everything fetched before it are marked whole
+  without asking again. Each of the rest is **re-checked once**: when what
+  Granola serves continues the archived text word for word, the archived copy
+  is completed; when Granola serves something else, or nothing, the archived
+  copy is kept as it is and marked `transcript_complete: false`. `verify`
+  counts the transcripts still due a check (`transcript-recheck`) and those
+  kept (`transcript-partial`). A plain `sync` re-checks the trailing window and
+  up to `--refresh-batch` older notes per run; `sync --full` re-checks every
+  one it lists.
 
 ### How the two backends join up
 

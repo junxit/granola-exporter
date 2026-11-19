@@ -96,6 +96,11 @@ EMPTY_WINDOWS_BEFORE_STOP = 6
 # it is known to be whole.
 TRANSCRIPT_GIVEUP_STREAK = 3
 
+# A transcript page holds 40,000 bytes unless asked otherwise, and older
+# versions never asked. One they archived that runs longer came back whole,
+# so the server was not paging transcripts when it was fetched.
+TRANSCRIPT_PAGE_BYTES = 40_000
+
 
 @dataclass(slots=True)
 class SyncOptions:
@@ -729,6 +734,12 @@ def sync_mcp(
     index = archive.load_index()
     uuid_map = archive.uuid_index()
 
+    if settled := _settle_unpaged_transcripts(archive, index):
+        print(
+            f"  {settled} transcript(s) were archived before Granola paged "
+            "transcripts, so they are whole."
+        )
+
     full = opts.full or not state.get("scanned_through")
     trailing_start = today - timedelta(days=opts.window_days)
     # Meetings listed only because the last run failed to fetch them.
@@ -1140,6 +1151,48 @@ def transcripts_to_recheck(index: dict[str, dict[str, Any]]) -> list[str]:
         ):
             waiting.append(key)
     return waiting
+
+
+def _settle_unpaged_transcripts(
+    archive: Archive, index: dict[str, dict[str, Any]]
+) -> int:
+    """Mark whole the transcripts archived before Granola paged them.
+
+    Any transcript an older version archived may be the first page of a longer
+    one -- unless the archive shows the server was not paging when it was
+    fetched. One that runs longer than a page proves exactly that for the
+    moment it was fetched, and so for everything fetched before it: paging,
+    once it arrived, stayed. Those transcripts are marked whole with no
+    request at all, and are never compared with a transcript Granola has since
+    rendered differently.
+
+    Args:
+        archive: The archive holding the notes.
+        index: The loaded index, updated in place.
+
+    Returns:
+        How many transcripts were marked whole.
+    """
+    fetched: dict[str, datetime] = {}
+    whole_until: datetime | None = None
+    for key in transcripts_to_recheck(index):
+        when = parse_timestamp(index[key]["mcp"].get("transcript_fetched_at"))
+        if when is None:
+            continue
+        fetched[key] = when
+        transcript = _archived_transcript(archive, index[key])
+        if (
+            transcript is not None
+            and len(transcript.text.encode("utf-8")) > TRANSCRIPT_PAGE_BYTES
+            and (whole_until is None or when > whole_until)
+        ):
+            whole_until = when
+    if whole_until is None:
+        return 0
+    settled = [key for key, when in fetched.items() if when <= whole_until]
+    for key in settled:
+        _mcp_block(index[key])["transcript_complete"] = True
+    return len(settled)
 
 
 def _relist_windows(days: list[date], width: int) -> list[tuple[date, date]]:

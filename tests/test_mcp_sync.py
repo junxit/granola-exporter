@@ -1466,6 +1466,60 @@ def test_a_full_scan_rechecks_a_transcript_outside_the_window(tmp_path):
     assert _archived_text(tmp_path, key) == LONG
 
 
+def test_transcripts_from_before_paging_are_whole_without_a_request(tmp_path):
+    """One longer than a page proves the server was not paging when it was fetched.
+
+    So is everything fetched before it -- including a transcript Granola has
+    since rendered differently, which a comparison would only call different.
+    """
+    early, proof, later = _uuid(1), _uuid(2), _uuid(3)
+    longer_than_a_page = " Them: " + "the budget doubled again. " * 1800
+    fake = FakeMCP(
+        [
+            (early, "Kickoff", date(2026, 6, 1)),
+            (proof, "Planning", date(2026, 6, 2)),
+            (later, "Review", date(2026, 6, 3)),
+        ],
+        transcripts={proof: longer_than_a_page},
+    )
+    opts = SyncOptions(full=True, since=date(2026, 5, 1), refresh_batch=0)
+    sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    archive = Archive(tmp_path)
+    for uuid, stamp in (
+        (early, "2026-06-01T10:00:00+00:00"),
+        (proof, "2026-06-02T10:00:00+00:00"),
+        (later, "2026-06-03T10:00:00+00:00"),
+    ):
+        block = archive.load_index()[f"mcp_{uuid}"]["mcp"]
+        block.pop("transcript_complete")
+        block["transcript_fetched_at"] = stamp
+    archive.save_index()
+    fake.transcripts[early] = "Microphone: rendered another way since."
+    fake.calls.clear()
+
+    counts = sync_mcp(Archive(tmp_path), fake, opts, today=TODAY)
+
+    index = Archive(tmp_path).load_index()
+    assert all(
+        index[f"mcp_{u}"]["mcp"]["transcript_complete"] is True for u in (early, proof, later)
+    )
+    assert _requested_transcripts(fake) == [later], "only the one fetched after the proof"
+    assert counts.transcripts_kept == 0, "the re-rendered one is never compared"
+
+
+def _requested_transcripts(fake: FakeMCP) -> list[str]:
+    """Every meeting id sent to get_meeting_transcript, in order.
+
+    Args:
+        fake: The fake backend.
+
+    Returns:
+        The meeting ids.
+    """
+    return [args[0] for name, args in fake.calls if name == "get_meeting_transcript"]
+
+
 def test_a_whole_archived_transcript_is_checked_once(tmp_path):
     """Checking costs one fetch, and a transcript found whole is left alone."""
     uuid, key = _uuid(1), f"mcp_{_uuid(1)}"

@@ -14,11 +14,15 @@ Changelog
   truncated and next_offset. Only the first page was read, so a long meeting
   was archived cut short with nothing to say so -- and an archived
   transcript is never refetched, so it stayed that way. Every page is now
-  followed, each asked for as large as the server allows. Transcripts
-  archived by earlier versions are re-checked once: one the server's text
-  continues word for word is completed, and one it serves differently, or
-  not at all, is kept as archived and marked transcript_complete false in
-  index.json. verify counts both (transcript-recheck, transcript-partial).
+  followed, each asked for as large as the server allows. A transcript an
+  earlier version archived that runs longer than a page shows the server
+  was not paging yet, so it and every transcript fetched before it are
+  marked whole without a request -- Granola has also changed how it renders
+  transcripts, so comparing those would only find them different. Each of
+  the rest is re-checked once: one the server's text continues word for word
+  is completed, and one it serves differently, or not at all, is kept as
+  archived and marked transcript_complete false in index.json. verify counts
+  both (transcript-recheck, transcript-partial).
   A plain sync re-checks the trailing window and up to --refresh-batch older
   notes per run, after any still missing a transcript; sync --full re-checks
   every note it lists.
